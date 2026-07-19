@@ -51,6 +51,52 @@ pub enum MessageError {
     /// silently overwriting the existing handler.
     #[error("message type {0:#010x} is already registered")]
     DuplicateType(u32),
+
+    // --- WU2: the seal / signature / replay / expiry pipeline (SPEC §5) ---
+    /// A received G1 point (the `kem_enc` encapsulation or the resolved sender key) failed the
+    /// mandatory prime-order subgroup / non-identity check BEFORE any DH (SPEC §5.1). Fail-closed:
+    /// blocks small-subgroup / invalid-curve key-recovery attacks.
+    #[error("G1 subgroup / non-identity check failed on the seal key material")]
+    InvalidPoint,
+
+    /// The sender DID could not be resolved to a BLS G1 identity key at the claimed epoch (SPEC §5.2).
+    /// An unknown/unresolvable sender means the seal cannot be authenticated — fail-closed.
+    #[error("sender DID could not be resolved to an identity key")]
+    UnresolvableSender,
+
+    /// Sealing failed to produce ciphertext (an AEAD encrypt or ephemeral-key error, SPEC §5.1).
+    #[error("seal failed: {0}")]
+    SealFailed(String),
+
+    /// The AEAD open failed — a wrong recipient key, wrong sender key, tampered ciphertext, or
+    /// tampered AAD header all land here (SPEC §5.1/§5.2). Fail-closed, no plaintext is revealed.
+    #[error("seal open failed (wrong key or tampered ciphertext/header)")]
+    OpenFailed,
+
+    /// The mandatory BLS G2 sender signature was absent, malformed, or did not verify against the
+    /// resolved sender key over `SIG_DOMAIN || transcript` (SPEC §5.1). Fail-closed REJECT.
+    #[error("BLS sender signature verification failed")]
+    BadSignature,
+
+    /// The sealed inner `message_type`/`correlation_id` did not equal the cleartext header — an
+    /// anti type-confusion / anti-splice REJECT (SPEC §5.2 step b).
+    #[error("sealed inner header does not match the cleartext header (type-confusion / splice)")]
+    HeaderMismatch,
+
+    /// The message is a replay or is stale: a duplicate counter, a counter below the sliding window,
+    /// or a `timestamp_ms` outside the freshness window (SPEC §5.6). Fail-closed DROP.
+    #[error("anti-replay check failed (duplicate, stale, or outside the freshness window)")]
+    Replay,
+
+    /// The message is past its sender-controlled `expires_at` TTL and is DISCARDED with no side
+    /// effect (SPEC §5.6b).
+    #[error("message expired (now > expires_at)")]
+    Expired,
+
+    /// `expires_at` exceeds `timestamp_ms + MAX_MESSAGE_TTL_MS` — a near-infinite validity claim,
+    /// REJECTED (never clamped, since clamping would alter signed content) (SPEC §5.6b).
+    #[error("expires_at exceeds the maximum message TTL")]
+    TtlTooLong,
 }
 
 /// The crate result alias.

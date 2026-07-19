@@ -13,10 +13,16 @@
 //!   the decompression-bomb guard (SPEC §1.1).
 //! - The pinned protocol [`constants`] and the [`MessageError`] taxonomy.
 //!
+//! ## What WU2 (this milestone) adds — the e2e SEAL pipeline (SPEC §5)
+//! - [`seal_message`] / [`open_message`] — the full compress → BLS-G2 sign → G1-DHKEM auth-seal (send)
+//!   and unseal → verify → replay → expiry → decompress (receive) pipeline, fail-closed at each step.
+//! - [`SealParams`] / [`OpenedMessage`] — the seal inputs + the opened, verified result.
+//! - [`ReplayGuard`] — the SPEC §5.6 anti-replay state machine (freshness window + bounded
+//!   sliding-window dedup + LRU sender cap).
+//! - [`TranscriptFields`] — the domain-separated signed transcript (SPEC §5.1 / §5.1a).
+//! - The seal uses `dig-identity`'s ONE BLS12-381 keypair (G2 sign + G1 DH); NO X25519, NO Ed25519.
+//!
 //! ## What later WUs add (the FIELDS are already final here)
-//! - **WU2** fills the seal ([`SealedPayload::kem_enc`] + `ciphertext`, DHKEM-over-G1) and the BLS G2
-//!   sender signature ([`InnerMessage::sender_sig`]), and enforces the SPEC §5.6/§5.6b replay/expiry
-//!   checks.
 //! - **WU4** drives the SPEC §3 streaming state machine over [`StreamHeader`].
 //! - **WU5** adds the wasm/JS surface + the Rust↔wasm byte-agreement KAT.
 //!
@@ -32,6 +38,9 @@ pub mod constants;
 pub mod envelope;
 pub mod error;
 pub mod registry;
+pub mod replay;
+pub mod seal;
+pub mod transcript;
 
 pub use compression::{
     compress_payload, decompress_payload, CompressedPayload, COMPRESSION_NONE, COMPRESSION_ZSTD,
@@ -46,3 +55,6 @@ pub use registry::{
     Dispatch, MessageBand, MessageKind, MessageRegistry, BAND_CORE, BAND_DIG_CHAT, BAND_DIG_EMAIL,
     BAND_DIG_VIDEO, BAND_EXPERIMENTAL, BAND_IPC, BAND_PEER_RPC, BAND_PRESENCE,
 };
+pub use replay::ReplayGuard;
+pub use seal::{open_message, seal_message, seal_with_ephemeral, OpenedMessage, SealParams};
+pub use transcript::TranscriptFields;
