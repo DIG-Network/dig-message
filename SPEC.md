@@ -194,12 +194,20 @@ State machine (each direction tracked independently for half-close):
   | 0x0000_0300 .. 0x0000_03FF | dig-email (#794) |
   | 0x0000_0400 .. 0x0000_04FF | dig-video-chat (#795, signaling) |
   | 0x0000_0500 .. 0x0000_05FF | presence / directed data-request |
+  | 0x0000_0700 .. 0x0000_07FF | dig-social-graph connection manager (#1192, #991) |
+  | 0x0000_0800 .. 0x0000_08FF | node<->relay sealed control (register/hole-punch/retainer, #1199) |
+  | 0x0000_0900 .. 0x0000_09FF | relay<->relay mesh (#1200) |
   | >= 0x1000_0000 | experimental / vendor (never shipped as canonical) |
 
   Core band assignments (additive, WU3): handshake = 0x0000_0000, ack = 0x0000_0001,
-  error = 0x0000_0002, keepalive = 0x0000_0003. An id that falls in NO allocated subsystem band above
-  (e.g. 0x0000_0700 .. 0x0FFF_FFFF) is Reserved for a future band; a reader MUST still be able to
-  classify it (it maps to the Reserved band) and MUST apply the unknown-type rule if it is unregistered.
+  error = 0x0000_0002, keepalive = 0x0000_0003. The social-graph, relay-control, and relay-mesh bands
+  above are RESERVATIONS ONLY (Tier-0 foundation for the relay seal family, #1199/#1200, and the
+  social-graph connection manager, #1192): no concrete MessageType ids are allocated within them yet
+  beyond the first social-graph consumer id noted in dig-social-graph's own SPEC (#991 SG-2); a reader
+  MUST still classify any id in these ranges to its named band. An id that falls in NO allocated
+  subsystem band above (e.g. 0x0000_0A00 .. 0x0FFF_FFFF) is Reserved for a future band; a reader MUST
+  still be able to classify it (it maps to the Reserved band) and MUST apply the unknown-type rule if
+  it is unregistered.
 - The registration seam (Rust): a MessageKind trait — const TYPE_ID: MessageType; type Payload:
   Streamable; — plus a runtime MessageRegistry (MessageType -> decode+dispatch) a subsystem populates
   additively. A downstream crate (dig-chat) implements MessageKind for its payload types and registers

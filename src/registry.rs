@@ -37,6 +37,17 @@ pub const BAND_DIG_VIDEO: u32 = 0x0000_0400;
 pub const BAND_PRESENCE: u32 = 0x0000_0500;
 /// The base of the dig-ipc-protocol band (authenticated local dig-app ↔ dig-node IPC) (SPEC §4).
 pub const BAND_IPC: u32 = 0x0000_0600;
+/// The base of the dig-social-graph band — the social-graph connection manager's directed connection
+/// offers/acceptances (SPEC §4, #1192, #991 SG-2). RESERVED: no concrete ids allocated yet beyond
+/// the first-consumer `MSG_TYPE_CONNECTION_OFFER` (#991), which lives in dig-social-graph.
+pub const BAND_SOCIAL_GRAPH: u32 = 0x0000_0700;
+/// The base of the node↔relay sealed control band — register / hole-punch / retainer traffic between a
+/// DIG Node and its relay (SPEC §4, #1199). RESERVED: owned by the dig-relay/dig-node relay-control
+/// wire, no concrete ids allocated yet.
+pub const BAND_RELAY_CONTROL: u32 = 0x0000_0800;
+/// The base of the relay↔relay mesh band — frames exchanged between relay instances forming the relay
+/// mesh (SPEC §4, #1200). RESERVED: owned by dig-relay's mesh wire, no concrete ids allocated yet.
+pub const BAND_RELAY_MESH: u32 = 0x0000_0900;
 /// The base of the experimental / vendor band — never shipped as a canonical type (SPEC §4).
 pub const BAND_EXPERIMENTAL: u32 = 0x1000_0000;
 
@@ -58,6 +69,12 @@ pub enum MessageBand {
     Presence,
     /// dig-ipc-protocol (`0x0000_0600..=0x0000_06FF`).
     Ipc,
+    /// dig-social-graph connection manager (`0x0000_0700..=0x0000_07FF`, #1192).
+    SocialGraph,
+    /// Node↔relay sealed control — register/hole-punch/retainer (`0x0000_0800..=0x0000_08FF`, #1199).
+    RelayControl,
+    /// Relay↔relay mesh frames (`0x0000_0900..=0x0000_09FF`, #1200).
+    RelayMesh,
     /// Experimental / vendor, never canonical (`>= 0x1000_0000`).
     Experimental,
     /// A currently-unallocated id, reserved for a future subsystem band (SPEC §4).
@@ -86,6 +103,9 @@ impl MessageType {
             0x0000_0400..=0x0000_04FF => MessageBand::DigVideo,
             0x0000_0500..=0x0000_05FF => MessageBand::Presence,
             0x0000_0600..=0x0000_06FF => MessageBand::Ipc,
+            0x0000_0700..=0x0000_07FF => MessageBand::SocialGraph,
+            0x0000_0800..=0x0000_08FF => MessageBand::RelayControl,
+            0x0000_0900..=0x0000_09FF => MessageBand::RelayMesh,
             0x1000_0000..=0xFFFF_FFFF => MessageBand::Experimental,
             _ => MessageBand::Reserved,
         }
@@ -399,6 +419,12 @@ mod tests {
             (BAND_PRESENCE, MessageBand::Presence),
             (BAND_IPC, MessageBand::Ipc),
             (BAND_IPC + 0xFF, MessageBand::Ipc),
+            (BAND_SOCIAL_GRAPH, MessageBand::SocialGraph),
+            (BAND_SOCIAL_GRAPH + 0xFF, MessageBand::SocialGraph),
+            (BAND_RELAY_CONTROL, MessageBand::RelayControl),
+            (BAND_RELAY_CONTROL + 0xFF, MessageBand::RelayControl),
+            (BAND_RELAY_MESH, MessageBand::RelayMesh),
+            (BAND_RELAY_MESH + 0xFF, MessageBand::RelayMesh),
             (BAND_EXPERIMENTAL, MessageBand::Experimental),
             (0xFFFF_FFFF, MessageBand::Experimental),
         ];
@@ -409,8 +435,8 @@ mod tests {
 
     #[test]
     fn unallocated_ids_classify_as_reserved() {
-        // Just past the last named subsystem band (IPC ends at 0x06FF) and below experimental.
-        for id in [0x0000_0700, 0x0000_1000, 0x00FF_FFFF, 0x0FFF_FFFF] {
+        // Just past the last named subsystem band (relay-mesh ends at 0x09FF) and below experimental.
+        for id in [0x0000_0A00, 0x0000_1000, 0x00FF_FFFF, 0x0FFF_FFFF] {
             assert_eq!(
                 MessageType(id).band(),
                 MessageBand::Reserved,
