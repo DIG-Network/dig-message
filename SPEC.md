@@ -315,23 +315,48 @@ uncompressed_len. Because every field lives inside the AEAD-authenticated + sign
 be tampered by a relay.
 
 ### 5.3 Streaming keys
-The STREAM OPEN seal establishes a per-stream secret via an HKDF-Expand of the OPEN shared_secret
-(section 5.1), exporter_context = "dig-message/stream/v1" || correlation_id || kem_enc. Binding kem_enc
-(the fresh ephemeral G1 encapsulation per OPEN) makes the per-stream key unique per session even if a
-correlation_id ever recurred, so a frame from a prior session can never be decrypted or injected into a
-new one (cross-session replay defense). EVERY stream frame is BLS-signed inside its seal per section 5.1,
-with the transcript binding stream_frame + stream_seq, so no frame can be replayed, reordered, injected,
-or forged; the monotonic per-direction seq (section 3) is the replay index within a session. Subsequent
-DATA chunks are AEAD-sealed (ChaCha20Poly1305) under keys derived from the per-stream secret with nonce =
-seq, so per-chunk DH is avoided while confidentiality + ordering + replay-resistance hold. Each DATA
-chunk is compressed (section 1.1) INDEPENDENTLY before its AEAD seal — one compression context per chunk,
-never a shared running context (see the compress-then-encrypt boundary, section 5.5). The stream
+EVERY stream frame (OPEN / OPEN_ACK / DATA / CREDIT / CLOSE / CLOSE_ACK / RESET) is an INDEPENDENT
+section 5.1 sealed envelope: BLS-signed inside its own seal with the transcript binding stream_frame +
+stream_seq, and G1-DHKEM auth-sealed under its OWN FRESH ephemeral (a distinct kem_enc per frame). This
+per-frame fresh-ephemeral rule is NORMATIVE and load-bearing (WU4 security review, #1162/#1183): reusing
+one ECDH ephemeral across frames would reuse the derived (key, base-nonce) and a repeated
+ChaCha20Poly1305 nonce is a catastrophic AEAD break, so a conforming sender MUST NOT derive DATA-chunk
+keys from a single shared per-stream secret with nonce = seq. Each frame therefore gets per-frame forward
+secrecy for free, and no frame can be replayed, reordered, injected, or forged. Cross-session frame
+replay is rejected by TWO independent mechanisms: (a) the persistent per-(sender → recipient) anti-replay
+scheme of section 5.6 (monotonic counter + freshness window + sliding-window dedup) drops any captured
+frame re-injected later; and (b) a frame's correlation_id must address a LIVE session at the receiver — a
+frame from another stream/session carries a different (random) correlation_id and matches no session. The
+monotonic per-direction stream_seq (section 3) is the in-order delivery + replay index within a session.
+
+Each DATA chunk is compressed (section 1.1) INDEPENDENTLY before its seal — one compression context per
+chunk, never a shared running context (see the compress-then-encrypt boundary, section 5.5). The stream
 compression algorithm id is fixed at OPEN (carried in the sealed OPEN InnerMessage); each DATA chunk
 declares its own uncompressed_len for the per-chunk MAX_CHUNK_DECOMPRESSED_BYTES bomb guard
 (default = MAX_CHUNK_BYTES). The stream expires_at is the OPEN frame expires_at and bounds the WHOLE
 session: once now_ms > session.expires_at a receiver MUST discard further frames and RESET the stream
-(section 5.6b). The base spec provides this per-stream secure channel; a higher layer (dig-chat #768) MAY
-layer a Double Ratchet over its payload.
+(section 5.6b). A per-peer concurrent-stream cap (MAX_CONCURRENT_STREAMS, default 64) bounds how many
+streams one peer may hold OPEN at once — the transport reassembler is bounded per-stream (256 chunks /
+4 MiB), so without this cap N concurrent streams would allow an N × 4 MiB memory DoS; a new OPEN beyond
+the cap is rejected and the stream RESET. The base spec provides this per-stream secure channel; a higher
+layer (dig-chat #768) MAY layer a Double Ratchet over its payload.
+
+RESET-on-failed-verify — DROP, do not broadcast (NORMATIVE, anti-storm). The security purpose of
+rejecting a bad frame is to NEVER deliver corrupt data and NEVER let a bad frame poison a stream;
+SILENTLY DROPPING the frame fully satisfies that. A RESET is itself a real signed, non-replayable frame,
+so a receiver MUST NOT emit one in response to unauthenticated or duplicate input — otherwise the
+untrusted relay (section 5.4) weaponizes it: (a) a self-sustaining RESET reflection storm (inject ONE
+garbage frame with an arbitrary correlation_id → receiver RESETs → the other side has no such session →
+it RESETs back → unbounded ping-pong, each hop a BLS verify + BLS sign + KEM), and (b) a replay-teardown
+(re-inject one prior valid DATA frame on a LIVE stream → the anti-replay guard rejects it → a RESET tears
+down the healthy stream — a relay holding NO key kills any stream). Therefore a receiver MUST **DROP
+silently** (no frame emitted, any live session left UNTOUCHED) for: a failed open/verify (bad seal, bad
+signature, replay, expiry, unresolvable sender), a non-stream or unknown-kind frame, an inbound RESET,
+and any frame addressing an UNKNOWN stream. A receiver MUST emit a RESET **only** for a state-machine
+violation (bad seq/credit/half-close) detected on an AUTHENTICATED frame for a KNOWN, live session, or
+for the concurrent-stream cap on an authenticated OPEN — cases where the frame is provably genuine, so it
+cannot be forged or replayed and the peer receiving the RESET for its own live/opening stream tears it
+down without re-RESETting. **A RESET MUST NEVER beget a RESET.**
 
 ### 5.4 Public-broadcast exemption
 Consensus broadcast (opcodes 200-219: blocks, transactions, attestations, checkpoints — addressed to ALL

@@ -400,7 +400,7 @@ dependencies = [
 
 [[package]]
 name = "dig-message"
-version = "0.3.3"
+version = "0.4.0"
 dependencies = [
  "chacha20poly1305",
  "chia-bls 0.26.0",

@@ -1,7 +1,8 @@
 //! Known-Answer-Test (KAT) harness for dig-message — the golden-vector infrastructure that pins the
 //! byte-level wire contract (SPEC §2, §7). WU1 fills the crypto-free vectors: the envelope encodings
-//! for every interaction shape and the compression round-trips. The seal / signature / replay /
-//! streaming vectors are the clearly-marked WU2/WU4 placeholders at the bottom.
+//! for every interaction shape and the compression round-trips; WU2 adds the seal/signature integration
+//! vectors; WU4 (#1162) adds the streaming vectors (round-trip, no-ephemeral-reuse, cross-session
+//! replay-reject, concurrent-stream cap) over the public streaming API.
 //!
 //! Golden values are committed as SHA-256 digests of the deterministic on-wire bytes: a digest change
 //! means the wire format drifted (a byte-determinism regression), which MUST be an intentional,
@@ -250,8 +251,156 @@ fn kat_bls_domain_separation_vs_chain_agg_sig() {
     );
 }
 
-// ── WU4 placeholders (streaming + replay/expiry, SPEC §3 / §5.6 / §5.6b) — implemented in #1162. ──
+// ── WU4 streaming KATs (SPEC §3, #1162) — golden vectors over the PUBLIC StreamEndpoint API ──
 //
-//   - streaming round-trip; CANCEL/RESET; backpressure; cross-session frame-replay reject
-//   - replayed message rejected; stale (old-counter/out-of-freshness) rejected
-//   - within-expires accepted; past-expires DISCARDED; expires_at > cap REJECTED; expires_at==0 no-op
+// The replay/expiry message-level vectors live in src/seal.rs unit tests (they need the pub(crate)
+// deterministic-ephemeral seal); these streaming vectors use only the public streaming surface.
+
+const KAT_MT: u32 = 0x0000_0200; // a dig-chat stream type
+
+/// A two-party streaming fixture: reproducible keys + DIDs for a KAT pair.
+struct KatPair {
+    a_sk: SecretKey,
+    a_did: Bytes32,
+    a_pub: [u8; 48],
+    b_sk: SecretKey,
+    b_did: Bytes32,
+    b_pub: [u8; 48],
+}
+fn kat_pair(tag: &str) -> KatPair {
+    let a_sk = kat_sk(&format!("{tag}/a"));
+    let b_sk = kat_sk(&format!("{tag}/b"));
+    KatPair {
+        a_pub: public_key_bytes(&a_sk),
+        b_pub: public_key_bytes(&b_sk),
+        a_did: b32(format!("{tag}/a-did").as_bytes()),
+        b_did: b32(format!("{tag}/b-did").as_bytes()),
+        a_sk,
+        b_sk,
+    }
+}
+
+#[test]
+fn kat_streaming_round_trip_open_data_close() {
+    let p = kat_pair("kat/stream/rt");
+    let mut alice = StreamEndpoint::new(&p.a_sk, p.a_did, 0, p.b_did, &p.b_pub, KAT_MT);
+    let mut bob = StreamEndpoint::new(&p.b_sk, p.b_did, 0, p.a_did, &p.a_pub, KAT_MT);
+    let from_alice = |_d: Bytes32, _e: u32| Some(p.a_pub);
+    let from_bob = |_d: Bytes32, _e: u32| Some(p.b_pub);
+    let stream = b32(b"kat/stream/rt/id");
+
+    let open = alice.open(stream, 4, KAT_NOW, 0).unwrap();
+    assert_eq!(
+        bob.accept(&open, from_alice, KAT_NOW).unwrap(),
+        StreamAccept::Event(StreamEvent::Opened)
+    );
+    let ack = bob.open_ack(stream, 4, KAT_NOW, 0).unwrap();
+    assert_eq!(
+        alice.accept(&ack, from_bob, KAT_NOW).unwrap(),
+        StreamAccept::Event(StreamEvent::Established)
+    );
+    let data = alice
+        .send_data(stream, b"streamed-payload", KAT_NOW, 0)
+        .unwrap();
+    assert_eq!(
+        bob.accept(&data, from_alice, KAT_NOW).unwrap(),
+        StreamAccept::Event(StreamEvent::Data(b"streamed-payload".to_vec()))
+    );
+    let close = alice.close(stream, KAT_NOW, 0).unwrap();
+    assert_eq!(
+        bob.accept(&close, from_alice, KAT_NOW).unwrap(),
+        StreamAccept::Event(StreamEvent::RemoteClosed)
+    );
+}
+
+#[test]
+fn kat_no_ephemeral_reuse_across_frames() {
+    // CUSTODY: every sealed frame MUST carry a distinct KEM ephemeral (kem_enc) — reuse would be
+    // ChaCha20Poly1305 nonce-reuse (#1183). Seal a batch and assert all kem_enc are unique.
+    let p = kat_pair("kat/stream/uniq");
+    let mut alice = StreamEndpoint::new(&p.a_sk, p.a_did, 0, p.b_did, &p.b_pub, KAT_MT);
+    let mut bob = StreamEndpoint::new(&p.b_sk, p.b_did, 0, p.a_did, &p.a_pub, KAT_MT);
+    let from_alice = |_d: Bytes32, _e: u32| Some(p.a_pub);
+    let from_bob = |_d: Bytes32, _e: u32| Some(p.b_pub);
+    let stream = b32(b"kat/stream/uniq/id");
+
+    let mut kems = Vec::new();
+    let open = alice.open(stream, 100, KAT_NOW, 0).unwrap();
+    kems.push(open.sealed.kem_enc);
+    bob.accept(&open, from_alice, KAT_NOW).unwrap();
+    let ack = bob.open_ack(stream, 100, KAT_NOW, 0).unwrap();
+    alice.accept(&ack, from_bob, KAT_NOW).unwrap();
+    for _ in 0..8 {
+        kems.push(
+            alice
+                .send_data(stream, b"x", KAT_NOW, 0)
+                .unwrap()
+                .sealed
+                .kem_enc,
+        );
+    }
+    let unique: std::collections::HashSet<_> = kems.iter().collect();
+    assert_eq!(unique.len(), kems.len(), "no two frames share an ephemeral");
+}
+
+#[test]
+fn kat_cross_session_frame_replay_rejected() {
+    let p = kat_pair("kat/stream/replay");
+    let mut alice = StreamEndpoint::new(&p.a_sk, p.a_did, 0, p.b_did, &p.b_pub, KAT_MT);
+    let mut bob = StreamEndpoint::new(&p.b_sk, p.b_did, 0, p.a_did, &p.a_pub, KAT_MT);
+    let from_alice = |_d: Bytes32, _e: u32| Some(p.a_pub);
+    let from_bob = |_d: Bytes32, _e: u32| Some(p.b_pub);
+    let stream = b32(b"kat/stream/replay/id");
+
+    let open = alice.open(stream, 4, KAT_NOW, 0).unwrap();
+    bob.accept(&open, from_alice, KAT_NOW).unwrap();
+    let ack = bob.open_ack(stream, 4, KAT_NOW, 0).unwrap();
+    alice.accept(&ack, from_bob, KAT_NOW).unwrap();
+    let data = alice.send_data(stream, b"once", KAT_NOW, 0).unwrap();
+    assert!(matches!(
+        bob.accept(&data, from_alice, KAT_NOW).unwrap(),
+        StreamAccept::Event(StreamEvent::Data(_))
+    ));
+    // Re-injecting the captured frame is dropped by the persistent replay guard → DROP, never a signed
+    // RESET (a RESET must not beget a RESET; §5.4 anti-storm). The live stream is left untouched.
+    assert!(matches!(
+        bob.accept(&data, from_alice, KAT_NOW).unwrap(),
+        StreamAccept::Dropped { .. }
+    ));
+    assert_eq!(
+        bob.stream_count(),
+        1,
+        "the replayed frame does not tear down the live stream"
+    );
+}
+
+#[test]
+fn kat_concurrent_stream_cap_rejects_overflow() {
+    let p = kat_pair("kat/stream/cap");
+    // Alice gets headroom so HER cap isn't the bottleneck; Bob keeps the default cap under test.
+    let mut alice = StreamEndpoint::new(&p.a_sk, p.a_did, 0, p.b_did, &p.b_pub, KAT_MT)
+        .with_max_concurrent(MAX_CONCURRENT_STREAMS + 1);
+    let mut bob = StreamEndpoint::new(&p.b_sk, p.b_did, 0, p.a_did, &p.a_pub, KAT_MT);
+    let from_alice = |_d: Bytes32, _e: u32| Some(p.a_pub);
+
+    // Fill to the default MAX_CONCURRENT_STREAMS, then prove the next OPEN is refused.
+    for i in 0..MAX_CONCURRENT_STREAMS {
+        let s = b32(format!("kat/stream/cap/{i}").as_bytes());
+        let open = alice.open(s, 1, KAT_NOW, 0).unwrap();
+        assert!(matches!(
+            bob.accept(&open, from_alice, KAT_NOW).unwrap(),
+            StreamAccept::Event(StreamEvent::Opened)
+        ));
+    }
+    let overflow = alice
+        .open(b32(b"kat/stream/cap/overflow"), 1, KAT_NOW, 0)
+        .unwrap();
+    assert!(matches!(
+        bob.accept(&overflow, from_alice, KAT_NOW).unwrap(),
+        StreamAccept::Reset {
+            cause: MessageError::StreamLimit { .. },
+            ..
+        }
+    ));
+    assert_eq!(bob.stream_count(), MAX_CONCURRENT_STREAMS);
+}
