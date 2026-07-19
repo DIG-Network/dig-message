@@ -7,7 +7,7 @@ This project adheres to [Semantic Versioning](https://semver.org) and
 ## [0.4.0] - 2026-07-19
 
 ### Features
-- **stream:** WU4 streaming state machine + per-frame seal (SPEC §3, #1162) — OPEN/OPEN_ACK/DATA/CREDIT/CLOSE/CLOSE_ACK/RESET with ordered delivery, credit backpressure, bidirectional half-close, and cancel; every frame sealed with a fresh ephemeral (per-frame forward secrecy, no nonce reuse); per-peer concurrent-stream cap (MAX_CONCURRENT_STREAMS). A bad/unauthenticated/duplicate frame is DROPPED (a RESET never begets a RESET — no relay-driven reflection storm or replay-teardown); a RESET is emitted only for an authenticated state-machine violation on a known stream or the concurrent-stream cap.
+- **stream:** WU4 streaming state machine + per-frame seal (SPEC §3) (#7)
 
 ## [0.3.3] - 2026-07-19
 
