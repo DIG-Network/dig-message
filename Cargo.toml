@@ -32,6 +32,8 @@ crate-type = ["cdylib", "rlib"]
 chia-protocol = "0.26"
 chia-traits = "0.26"
 chia_streamable_macro = "0.26"
+# The Streamable derive expands to `chia_sha2`-based `hash()` helpers (SPEC §5.1 transcript hashing).
+chia-sha2 = "0.26"
 # zstd (compression id=1), pinned to level 3, single-frame, no dictionary — deterministic across
 # targets (SPEC §1.1/§1.2). A WASM libzstd build supplies the wasm-target parity in WU5.
 zstd = "0.13"

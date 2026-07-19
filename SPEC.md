@@ -136,6 +136,10 @@ seal (section 5) to prevent type-confusion. No payload content is ever cleartext
 algorithm id and the uncompressed length live INSIDE the seal (section 5.2 InnerMessage), NOT in the
 cleartext header — so compression metadata is AEAD-authenticated and invisible to the relay.
 [KAT: golden envelope bytes for each shape, including a raw(id=0) and a zstd(id=1) sealed payload.]
+(WU1 golden vectors — committed as SHA-256 digests of the deterministic on-wire bytes — live in
+`tests/kat.rs`: one-shot / request / response / stream-frame envelope encodings + the raw and
+zstd(level-3) compression round-trips; the seal/signature/replay/streaming vectors are the marked
+WU2/WU4 placeholders there.)
 
 ## 3. The three interaction shapes + streaming state machine (NORMATIVE)
 
