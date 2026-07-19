@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [0.3.3] - 2026-07-19
+
+### Bug Fixes
+- **release:** Sync + commit Cargo.lock on version bump (unblocks publish) (#9)
+
 ## [0.3.2] - 2026-07-19
 
 ### Documentation
