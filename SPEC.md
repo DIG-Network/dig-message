@@ -243,7 +243,7 @@ anywhere.
     `version:u8 ‖ message_type:u32 ‖ flags:u8 ‖ correlation_id:32B ‖ sender:32B ‖ recipient:32B ‖
     sender_epoch:u32 ‖ counter:u64 ‖ timestamp_ms:u64 ‖ expires_at:u64 ‖ stream_frame:u8 ‖
     stream_seq:u64 ‖ kem_enc:48B ‖ compression:u8 ‖ uncompressed_len:u32 ‖ compressed_payload_hash:32B`
-    — total 235 transcript bytes plus the domain tag. `stream_frame`/`stream_seq` are 0 for a
+    — total 224 transcript bytes plus the domain tag. `stream_frame`/`stream_seq` are 0 for a
     non-stream message; `compressed_payload_hash` is the SHA-256 of the on-wire compressed payload
     bytes. A second implementation MUST reproduce these bytes exactly for its signature to verify.
   - Seal composition (NORMATIVE). The DHKEM-over-G1 key schedule is HKDF-SHA256 with `salt = empty`,
