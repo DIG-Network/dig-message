@@ -17,14 +17,21 @@
 //! - **WU2** fills the seal ([`SealedPayload::kem_enc`] + `ciphertext`, DHKEM-over-G1) and the BLS G2
 //!   sender signature ([`InnerMessage::sender_sig`]), and enforces the SPEC §5.6/§5.6b replay/expiry
 //!   checks.
-//! - **WU3** adds the runtime `MessageRegistry` that dispatches on [`MessageType`].
 //! - **WU4** drives the SPEC §3 streaming state machine over [`StreamHeader`].
 //! - **WU5** adds the wasm/JS surface + the Rust↔wasm byte-agreement KAT.
+//!
+//! ## What WU3 (this milestone) adds — the extensible type registry (crypto-free, SPEC §4)
+//! - [`MessageBand`] + [`MessageType::band`] — the reserved id-band allocation + classification.
+//! - [`MessageKind`] — the compile-time seam a downstream type declares (id + typed payload).
+//! - [`MessageRegistry`] — the runtime register/lookup/route table, additive-only, with the SPEC §4
+//!   unknown-type rule (UNSUPPORTED_TYPE for request/stream, silent [`Dispatch::Dropped`] otherwise;
+//!   never a panic).
 
 pub mod compression;
 pub mod constants;
 pub mod envelope;
 pub mod error;
+pub mod registry;
 
 pub use compression::{
     compress_payload, decompress_payload, CompressedPayload, COMPRESSION_NONE, COMPRESSION_ZSTD,
@@ -35,3 +42,7 @@ pub use envelope::{
     MessageType, SealedPayload, StreamFrame, StreamHeader, FLAG_SEALED, FLAG_SHAPE_MASK,
 };
 pub use error::{MessageError, Result};
+pub use registry::{
+    Dispatch, MessageBand, MessageKind, MessageRegistry, BAND_CORE, BAND_DIG_CHAT, BAND_DIG_EMAIL,
+    BAND_DIG_VIDEO, BAND_EXPERIMENTAL, BAND_IPC, BAND_PEER_RPC, BAND_PRESENCE,
+};
