@@ -628,6 +628,21 @@ impl<'a> StreamEndpoint<'a> {
             Err(cause) => return Ok(StreamAccept::Dropped { cause }),
         };
 
+        // 1b. The AUTHENTICATED sender must be the exact peer this endpoint was constructed for (SPEC
+        //     §3 hard rule). `open_message` only proves `envelope.sender` genuinely holds whatever key
+        //     `resolve_sender_pub` handed back for it — it does NOT know this session is scoped to ONE
+        //     peer. A resolver that is accidentally peer-unscoped (looks keys up for ANY DID, not just
+        //     `self.peer_did`) would otherwise let a third authenticated party drive frames on this
+        //     stream. Hard-DROP (no RESET — this frame never named a live stream on THIS peer's behalf,
+        //     so a RESET here would itself be a reflection the wrong party could provoke).
+        if opened.sender != self.peer_did {
+            return Ok(StreamAccept::Dropped {
+                cause: MessageError::StreamProtocol(
+                    "authenticated sender is not this stream's peer",
+                ),
+            });
+        }
+
         // 2. It MUST be a stream frame with a known kind (SPEC §3). A malformed-but-authenticated frame
         //    is a no-op → DROP (no RESET: still not an actionable state-machine event).
         let Some(hdr) = envelope.stream else {
@@ -699,7 +714,12 @@ impl<'a> StreamEndpoint<'a> {
         hdr: StreamHeader,
         now_ms: u64,
     ) -> Result<StreamAccept> {
-        if self.sessions.contains_key(&correlation_id) {
+        if self.sessions.remove(&correlation_id).is_some() {
+            // A live session already occupies this correlation_id. The peer is re-OPENing it (a
+            // retry, a peer-side restart that forgot its state, or a genuine protocol violation) —
+            // either way OUR side and THEIRS must agree it's gone, so drop the stale local session
+            // before sealing the RESET (not merely reset THEIR view of it while we keep serving it;
+            // that would desync the two endpoints and leak the slot until an unrelated tear-down).
             return self.reset_response(
                 correlation_id,
                 now_ms,
@@ -1165,6 +1185,83 @@ mod tests {
             other => panic!("expected a RESET on the authenticated violation, got {other:?}"),
         }
         assert_eq!(bob.stream_count(), 0, "the violated session is dropped");
+    }
+
+    #[test]
+    fn authenticated_frame_from_a_non_peer_sender_is_hard_dropped() {
+        // #1201 WU4 hardening: a resolver that is accidentally peer-UNSCOPED (looks up ANY DID, not
+        // just this endpoint's configured peer) would otherwise let a third genuinely-authenticated
+        // party drive frames on a stream that isn't theirs. Eve signs a fully valid OPEN with her OWN
+        // key/DID; the permissive resolver correctly proves it's really Eve — but Eve is not Bob's
+        // peer (`p.a_did`), so `accept()` MUST hard-drop it, never open a session for her, and NEVER
+        // reflect a RESET (a RESET here would itself be a reflection an unrelated party provoked).
+        let p = pair("senderbind");
+        let eve_sk = sk("senderbind/eve");
+        let eve_did = cid("senderbind/eve-did");
+        let eve_pub = public_key_bytes(&eve_sk);
+        let mut bob = StreamEndpoint::new(&p.b_sk, p.b_did, 0, p.a_did, &p.a_pub, MT);
+        // Eve addresses Bob directly, exactly as Alice would, but signs as HERSELF.
+        let mut eve = StreamEndpoint::new(&eve_sk, eve_did, 0, p.b_did, &p.b_pub, MT);
+        // The misconfigured resolver: resolves ANY did to its real key (permissive, not peer-scoped).
+        let permissive_resolver = move |d: Bytes32, _e: u32| {
+            if d == eve_did {
+                Some(eve_pub)
+            } else {
+                Some(p.a_pub)
+            }
+        };
+        let stream = cid("senderbind/s");
+
+        let open = eve.open(stream, 4, NOW, 0).unwrap();
+        assert_eq!(
+            bob.accept(&open, permissive_resolver, NOW).unwrap(),
+            StreamAccept::Dropped {
+                cause: MessageError::StreamProtocol(
+                    "authenticated sender is not this stream's peer"
+                )
+            }
+        );
+        assert_eq!(
+            bob.stream_count(),
+            0,
+            "no session opened for the wrong peer"
+        );
+    }
+
+    #[test]
+    fn duplicate_open_for_a_live_stream_drops_the_local_session_too() {
+        // #1201 WU4 hardening: a duplicate OPEN on an already-live correlation_id used to RESET the
+        // peer's view while Bob silently kept serving the old session — a local/peer desync that also
+        // held the slot until an unrelated tear-down. Both sides must agree the stream is gone.
+        let p = pair("dupopen");
+        let mut alice = StreamEndpoint::new(&p.a_sk, p.a_did, 0, p.b_did, &p.b_pub, MT);
+        let mut bob = StreamEndpoint::new(&p.b_sk, p.b_did, 0, p.a_did, &p.a_pub, MT);
+        let sender_is_alice = |_d: Bytes32, _e: u32| Some(p.a_pub);
+        let stream = cid("dupopen/s");
+
+        let open = alice.open(stream, 4, NOW, 0).unwrap();
+        assert!(matches!(
+            bob.accept(&open, sender_is_alice, NOW).unwrap(),
+            StreamAccept::Event(StreamEvent::Opened)
+        ));
+        assert_eq!(bob.stream_count(), 1);
+
+        // Alice (re)sends OPEN for the SAME correlation_id — e.g. she forgot her own state (a restart)
+        // and retries a fresh, genuinely-authenticated OPEN — while Bob's session is still live.
+        alice.sessions.remove(&stream);
+        let dup_open = alice.open(stream, 4, NOW, 0).unwrap();
+        match bob.accept(&dup_open, sender_is_alice, NOW).unwrap() {
+            StreamAccept::Reset { cause, .. } => {
+                assert!(matches!(cause, MessageError::StreamProtocol(_)));
+            }
+            other => panic!("expected a RESET on the duplicate OPEN, got {other:?}"),
+        }
+        // Bob's local session is GONE — consistent with the RESET he just sealed to Alice.
+        assert_eq!(
+            bob.stream_count(),
+            0,
+            "the stale local session must not survive the duplicate OPEN"
+        );
     }
 
     #[test]
