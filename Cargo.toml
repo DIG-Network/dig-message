@@ -1,0 +1,45 @@
+# dig-message — the DIG Network generic base message protocol.
+#
+# ONE structured, typed, streamable, e2e-sealed envelope that every DIRECTED (1:1 / group) peer-to-peer
+# message rides. This crate is the envelope + framing + compression + type-registry + streaming + seal
+# contract; downstream message TYPES (dig-chat, dig-email, dig-video-chat, peer-RPC) register into it.
+#
+# WU1 (this milestone) ships the CRYPTO-FREE foundation: the byte-deterministic Chia-Streamable
+# envelope + InnerMessage, the length-framed size-bounded codec, the compression layer (raw + zstd
+# with the decompression-bomb guard), and the KAT harness. The seal (DHKEM-over-G1) and the BLS
+# sender-signature/verify are WU2; the streaming state machine is WU4 — their FIELDS are present here
+# as placeholders so the wire shape is final.
+[package]
+name = "dig-message"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75.0"
+license = "Apache-2.0 OR MIT"
+description = "The DIG Network generic base message protocol: the byte-deterministic Chia-Streamable envelope + InnerMessage, length-framed size-bounded framing, additive compression (raw + zstd, decompression-bomb guarded), and the extensible message-type registry that every directed (1:1 / group) e2e-sealed peer message rides."
+repository = "https://github.com/DIG-Network/dig-message"
+readme = "README.md"
+keywords = ["dig", "messaging", "protocol", "streamable", "e2e"]
+categories = ["network-programming", "encoding", "cryptography"]
+
+[lib]
+# rlib for native consumers; cdylib so WU5 can compile the same crate to a wasm surface.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Byte-deterministic Chia Streamable wire types (Bytes32 DID, Bytes48 G1 encapsulation, Bytes96 G2
+# signature) + the Streamable derive + the to_bytes/from_bytes trait. The ONE encoding Rust, wasm,
+# and JS agree on byte-for-byte — never hand-roll framing (SPEC §1).
+chia-protocol = "0.26"
+chia-traits = "0.26"
+chia_streamable_macro = "0.26"
+# zstd (compression id=1), pinned to level 3, single-frame, no dictionary — deterministic across
+# targets (SPEC §1.1/§1.2). A WASM libzstd build supplies the wasm-target parity in WU5.
+zstd = "0.13"
+# The crate error taxonomy (UNSUPPORTED_VERSION / UNSUPPORTED_COMPRESSION / bomb-guard / size-bound).
+thiserror = "1"
+
+[dev-dependencies]
+# Deterministic KAT material derived from a hashed seed — never a hard-coded literal (CodeQL).
+sha2 = "0.10"
+rand_chacha = "0.3"
+rand_core = "0.6"
