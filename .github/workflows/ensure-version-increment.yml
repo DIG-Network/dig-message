@@ -12,6 +12,8 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read
 concurrency:
   group: ${{ github.ref }}-${{ github.workflow }}-${{ github.event_name }}
   cancel-in-progress: true
