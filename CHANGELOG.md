@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [0.5.1] - 2026-07-19
+
+### Bug Fixes
+- **dig-message:** Sender-binding hard-drop + dup-OPEN consistency + expiry-DROP spec (#11)
+
 ## [0.5.0] - 2026-07-19
 
 ### Features
