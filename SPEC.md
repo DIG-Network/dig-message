@@ -342,8 +342,8 @@ chunk, never a shared running context (see the compress-then-encrypt boundary, s
 compression algorithm id is fixed at OPEN (carried in the sealed OPEN InnerMessage); each DATA chunk
 declares its own uncompressed_len for the per-chunk MAX_CHUNK_DECOMPRESSED_BYTES bomb guard
 (default = MAX_CHUNK_BYTES). The stream expires_at is the OPEN frame expires_at and bounds the WHOLE
-session: once now_ms > session.expires_at a receiver MUST discard further frames and RESET the stream
-(section 5.6b). A per-peer concurrent-stream cap (MAX_CONCURRENT_STREAMS, default 64) bounds how many
+session: once now_ms > session.expires_at a receiver MUST DROP further frames for that stream (no RESET —
+consistent with the anti-storm rule below; section 5.6b). A per-peer concurrent-stream cap (MAX_CONCURRENT_STREAMS, default 64) bounds how many
 streams one peer may hold OPEN at once — the transport reassembler is bounded per-stream (256 chunks /
 4 MiB), so without this cap N concurrent streams would allow an N × 4 MiB memory DoS; a new OPEN beyond
 the cap is rejected and the stream RESET. The base spec provides this per-stream secure channel; a higher
@@ -365,6 +365,15 @@ violation (bad seq/credit/half-close) detected on an AUTHENTICATED frame for a K
 for the concurrent-stream cap on an authenticated OPEN — cases where the frame is provably genuine, so it
 cannot be forged or replayed and the peer receiving the RESET for its own live/opening stream tears it
 down without re-RESETting. **A RESET MUST NEVER beget a RESET.**
+
+**Sender-binding hard rule (NORMATIVE):** a stream endpoint is constructed for exactly ONE peer DID
+(`peer_did`). `open_message`'s `resolve_sender_pub` callback proves only that `envelope.sender` genuinely
+holds whatever key the callback returns for it — it says nothing about WHICH peer this session belongs
+to. The implementation MUST additionally assert `opened.sender == peer_did` after a successful open and
+hard-DROP (never RESET) on mismatch, and callers MUST supply a `resolve_sender_pub` that is itself
+peer-scoped (resolves keys only for the DID this endpoint session was constructed for). This is
+defense-in-depth: a peer-scoped resolver alone already prevents cross-peer frame injection, but the
+in-code assertion holds even if a resolver is accidentally wired permissively (looks up ANY DID).
 
 ### 5.4 Public-broadcast exemption
 Consensus broadcast (opcodes 200-219: blocks, transactions, attestations, checkpoints — addressed to ALL
@@ -460,7 +469,8 @@ per-message validity deadline the sender chooses (an offer valid 1h, a presence 
   wins), and a fresh-but-expired message is DISCARDED; a message must pass BOTH expiry AND anti-replay to
   be delivered.
 - Streaming: the OPEN frame expires_at bounds the whole session; once now_ms > session.expires_at the
-  receiver discards further frames and RESETs the stream (section 5.3).
+  receiver DROPS further frames for that stream (no RESET — an expired frame is unauthenticated-for-
+  this-purpose input, exactly the anti-storm DROP case of section 5.3, never a RESET-worthy violation).
 - [KAT: within-expires accepted; past-expires DISCARDED (no processing/side-effect); a tampered
   expires_at -> sig-verify FAILS (confirms it is inside the seal + signed); expired-but-in-freshness-
   window -> DISCARDED; fresh-but-expired -> DISCARDED; expires_at > timestamp_ms + MAX_MESSAGE_TTL_MS ->
