@@ -39,6 +39,18 @@ pub enum MessageError {
     /// A Streamable (de)serialization or codec-level failure with the underlying detail (SPEC §1).
     #[error("codec error: {0}")]
     Codec(String),
+
+    /// The `message_type` is not registered (SPEC §4). Returned when the dispatch shape is a request or
+    /// stream frame so the caller can reply UNSUPPORTED_TYPE; an unknown one-shot/response is instead
+    /// silently dropped (never surfaced as an error — the forward-compat property).
+    #[error("unsupported message type {0:#010x}")]
+    UnsupportedType(u32),
+
+    /// A [`crate::MessageType`] was registered twice (SPEC §4 additive-only: an id, once assigned, is
+    /// never renumbered or repurposed). A duplicate registration is a caller bug, reported — never
+    /// silently overwriting the existing handler.
+    #[error("message type {0:#010x} is already registered")]
+    DuplicateType(u32),
 }
 
 /// The crate result alias.

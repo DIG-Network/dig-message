@@ -196,10 +196,17 @@ State machine (each direction tracked independently for half-close):
   | 0x0000_0500 .. 0x0000_05FF | presence / directed data-request |
   | >= 0x1000_0000 | experimental / vendor (never shipped as canonical) |
 
+  Core band assignments (additive, WU3): handshake = 0x0000_0000, ack = 0x0000_0001,
+  error = 0x0000_0002, keepalive = 0x0000_0003. An id that falls in NO allocated subsystem band above
+  (e.g. 0x0000_0700 .. 0x0FFF_FFFF) is Reserved for a future band; a reader MUST still be able to
+  classify it (it maps to the Reserved band) and MUST apply the unknown-type rule if it is unregistered.
 - The registration seam (Rust): a MessageKind trait — const TYPE_ID: MessageType; type Payload:
   Streamable; — plus a runtime MessageRegistry (MessageType -> decode+dispatch) a subsystem populates
   additively. A downstream crate (dig-chat) implements MessageKind for its payload types and registers
-  them; dig-message never depends on a downstream crate.
+  them; dig-message never depends on a downstream crate. Registering an already-assigned id is REFUSED
+  (never silently overwritten), upholding the additive-only rule. dispatch(message_type, shape, payload)
+  routes to the registered handler; an unregistered type returns UNSUPPORTED_TYPE for a request/stream
+  shape and is silently dropped for a one-shot/response shape (never a panic).
 - [KAT: unknown-type-dropped (one-shot) + unknown-type-error (request) vectors.]
 
 ## 5. Security — e2e seal + universal sender signature + replay protection (HARD, ecosystem section 5.4)

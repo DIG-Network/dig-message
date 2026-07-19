@@ -20,10 +20,11 @@ Wire: a compact, byte-deterministic Chia-Streamable binary format (never JSON), 
 compressed (raw or zstd) BEFORE the seal, length-framed and size-bounded. `SPEC.md` is
 the normative contract.
 
-Status — **WU1 shipped** (this crate): the crypto-free foundation — envelope +
-`InnerMessage` structs, framing + size bounds, the compression codec, and the KAT
-harness. The seal + BLS sender-signature (WU2), type registry (WU3), streaming state
-machine (WU4), and wasm/JS bindings (WU5) follow; the fields they populate are already
-final on the wire.
+Status — **WU1 + WU3 shipped** (this crate): the crypto-free foundation — envelope +
+`InnerMessage` structs, framing + size bounds, the compression codec, the KAT harness,
+and the extensible message-type registry (`MessageBand` id classification, the
+`MessageKind` seam, and the additive `MessageRegistry` with the unknown-type forward-
+compat rule). The seal + BLS sender-signature (WU2), streaming state machine (WU4), and
+wasm/JS bindings (WU5) follow; the fields they populate are already final on the wire.
 
 Design + DAG: DIG-Network/dig_ecosystem#796.

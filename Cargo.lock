@@ -297,7 +297,7 @@ dependencies = [
 
 [[package]]
 name = "dig-message"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chia-protocol",
  "chia-sha2 0.26.0",
