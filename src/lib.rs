@@ -22,8 +22,16 @@
 //! - [`TranscriptFields`] — the domain-separated signed transcript (SPEC §5.1 / §5.1a).
 //! - The seal uses `dig-identity`'s ONE BLS12-381 keypair (G2 sign + G1 DH); NO X25519, NO Ed25519.
 //!
+//! ## What WU4 (this milestone) adds — the streaming state machine (SPEC §3)
+//! - [`StreamEndpoint`] — the per-peer registry driving OPEN/OPEN_ACK/DATA/CREDIT/CLOSE/CLOSE_ACK/RESET
+//!   with ordered delivery (strictly-monotonic seq), credit backpressure, bidirectional half-close, and
+//!   cancel. It seals EVERY frame with a fresh ephemeral (per-frame forward secrecy, no nonce reuse),
+//!   opens + fully verifies every inbound frame, bounds concurrent streams ([`MAX_CONCURRENT_STREAMS`]),
+//!   and RESETs a stream on any failed verify (gate items #1162).
+//! - [`StreamSession`] / [`StreamState`] / [`StreamEvent`] / [`StreamAccept`] — the pure state machine +
+//!   its observable states, verified events, and the accept outcome.
+//!
 //! ## What later WUs add (the FIELDS are already final here)
-//! - **WU4** drives the SPEC §3 streaming state machine over [`StreamHeader`].
 //! - **WU5** adds the wasm/JS surface + the Rust↔wasm byte-agreement KAT.
 //!
 //! ## What WU3 (this milestone) adds — the extensible type registry (crypto-free, SPEC §4)
@@ -40,6 +48,7 @@ pub mod error;
 pub mod registry;
 pub mod replay;
 pub mod seal;
+pub mod stream;
 pub mod transcript;
 
 pub use compression::{
@@ -57,4 +66,5 @@ pub use registry::{
 };
 pub use replay::ReplayGuard;
 pub use seal::{open_message, seal_message, OpenedMessage, SealParams};
+pub use stream::{StreamAccept, StreamEndpoint, StreamEvent, StreamSession, StreamState};
 pub use transcript::TranscriptFields;

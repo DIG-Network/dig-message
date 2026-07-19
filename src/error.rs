@@ -97,6 +97,18 @@ pub enum MessageError {
     /// REJECTED (never clamped, since clamping would alter signed content) (SPEC §5.6b).
     #[error("expires_at exceeds the maximum message TTL")]
     TtlTooLong,
+
+    // --- WU4: the streaming state machine (SPEC §3) ---
+    /// A new stream OPEN would exceed [`crate::MAX_CONCURRENT_STREAMS`] concurrently-open streams for
+    /// the peer (SPEC §3 gate item). Fail-closed DoS guard: the peer RESETs rather than opening more.
+    #[error("too many concurrent streams (cap {cap})")]
+    StreamLimit { cap: usize },
+
+    /// A stream frame is invalid for the current state machine position: an out-of-order/gap/replayed
+    /// `seq`, a frame for an unknown stream, a DATA beyond the granted credit window, a frame after a
+    /// half-close, or an out-of-sequence handshake frame (SPEC §3). Fail-closed REJECT → RESET.
+    #[error("stream protocol violation: {0}")]
+    StreamProtocol(&'static str),
 }
 
 /// The crate result alias.

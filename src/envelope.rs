@@ -81,6 +81,30 @@ pub enum StreamFrame {
     Reset = 6,
 }
 
+impl StreamFrame {
+    /// The frame kind for a [`StreamHeader::frame`] byte, or `None` for an unknown/reserved value
+    /// (a malformed frame is rejected, never panics — SPEC §3 / §4 spirit).
+    #[must_use]
+    pub fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(Self::Open),
+            1 => Some(Self::OpenAck),
+            2 => Some(Self::Data),
+            3 => Some(Self::Credit),
+            4 => Some(Self::Close),
+            5 => Some(Self::CloseAck),
+            6 => Some(Self::Reset),
+            _ => None,
+        }
+    }
+
+    /// This frame kind as its wire `u8` (the [`StreamHeader::frame`] value).
+    #[must_use]
+    pub fn as_u8(self) -> u8 {
+        self as u8
+    }
+}
+
 /// The e2e-sealed region (SPEC §5.2). WU1 defines the shape; WU2 fills `kem_enc` (the G1 ephemeral
 /// encapsulation) and `ciphertext` (`AEAD.Seal` of the [`InnerMessage`]).
 #[derive(Debug, Clone, PartialEq, Eq, Streamable)]

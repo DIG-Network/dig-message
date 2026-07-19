@@ -40,3 +40,11 @@ pub const MAX_MESSAGE_TTL_MS: u64 = 2_592_000_000;
 /// BLS signature domain tag — keeps a dig-message signature un-confusable with a Chia spend signature
 /// (SPEC §5.1a). The signing itself is WU2; the tag lives here as the shared constant.
 pub const SIG_DOMAIN: &[u8] = b"DIGNET-MSG:dig-message/v1";
+
+/// Per-peer cap on concurrently-OPEN streams (SPEC §3, WU4 gate item DIG-Network/dig_ecosystem#1162).
+///
+/// Each open stream backs a bounded transport reassembler (dig-gossip: 256 chunks / 4 MiB per stream),
+/// so without a per-peer cap a peer could open unbounded concurrent streams for an `N × 4 MiB` memory
+/// DoS. `64` bounds the aggregate per-peer reassembly buffer to ~256 MiB while comfortably serving real
+/// multiplexing. A new OPEN beyond this is rejected [`MessageError::StreamLimit`] (the peer RESETs).
+pub const MAX_CONCURRENT_STREAMS: usize = 64;
