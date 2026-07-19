@@ -237,6 +237,20 @@ anywhere.
   recipients; binding counter + timestamp_ms is the anti-replay commitment (section 5.6); binding
   expires_at makes the TTL sender-authenticated + un-extendable (section 5.6b); binding stream_frame +
   stream_seq prevents per-frame replay/reorder/cross-frame splice (section 5.3).
+  - Transcript encoding (NORMATIVE, byte-deterministic — the cross-implementation contract). The signed
+    bytes are `SIG_DOMAIN || transcript`, `SIG_DOMAIN = "DIGNET-MSG:dig-message/v1"` (ASCII, no NUL).
+    `transcript` is the fixed-width, BIG-ENDIAN concatenation, in this exact order:
+    `version:u8 ‖ message_type:u32 ‖ flags:u8 ‖ correlation_id:32B ‖ sender:32B ‖ recipient:32B ‖
+    sender_epoch:u32 ‖ counter:u64 ‖ timestamp_ms:u64 ‖ expires_at:u64 ‖ stream_frame:u8 ‖
+    stream_seq:u64 ‖ kem_enc:48B ‖ compression:u8 ‖ uncompressed_len:u32 ‖ compressed_payload_hash:32B`
+    — total 224 transcript bytes plus the domain tag. `stream_frame`/`stream_seq` are 0 for a
+    non-stream message; `compressed_payload_hash` is the SHA-256 of the on-wire compressed payload
+    bytes. A second implementation MUST reproduce these bytes exactly for its signature to verify.
+  - Seal composition (NORMATIVE). The DHKEM-over-G1 key schedule is HKDF-SHA256 with `salt = empty`,
+    `ikm = Z` (the two concatenated 48-byte DH points, section 5.1 order), and
+    `info = "dig-message/dhkem-g1/v1" || kem_enc || sender_pub || recipient_pub`, expanded to 44 bytes
+    = the 32-byte ChaCha20Poly1305 key ‖ the 12-byte base nonce. `ciphertext = AEAD.Seal(key, nonce,
+    aad = cleartext-header-bytes, pt = InnerMessage)` (section 5.2).
 - SEAL = DHKEM over the BLS12-381 G1 prime-order subgroup + HKDF-SHA256 + ChaCha20Poly1305-AEAD, in AUTH
   mode. This instantiates the GENERIC, group-agnostic HPKE DHKEM (RFC 9180 section 4.1) over a valid
   prime-order DH group (G1, order r), exactly as ECIES/DHIES (SEC1, ISO 18033-2) is defined over any such

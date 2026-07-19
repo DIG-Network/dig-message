@@ -11,7 +11,7 @@
 # as placeholders so the wire shape is final.
 [package]
 name = "dig-message"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.75.0"
 license = "Apache-2.0 OR MIT"
@@ -39,9 +39,23 @@ chia-sha2 = "0.26"
 zstd = "0.13"
 # The crate error taxonomy (UNSUPPORTED_VERSION / UNSUPPORTED_COMPRESSION / bomb-guard / size-bound).
 thiserror = "1"
+# The ONE identity keypair primitives (WU2 seal): g1_dh / sign_message / verify_signature /
+# g1_subgroup_check / public_key_bytes over the Chia BLS12-381 key — NEVER re-roll BLS/curve ops
+# (SPEC §5.1). Crates.io dep (the #1160 resolution: dig-identity is published).
+dig-identity = "0.4"
+# chia-bls SecretKey/PublicKey types + the ephemeral-key derivation for the DHKEM encapsulation
+# (pinned to dig-identity's version so the key types agree byte-for-byte).
+chia-bls = "0.26"
+# The DHKEM/HKDF/AEAD composition (SPEC §5.1) lives HERE, not in dig-identity: HKDF-SHA256 key
+# schedule + ChaCha20Poly1305 AEAD + the SHA-256 transcript hash. Vetted RustCrypto crates.
+hkdf = "0.12"
+sha2 = "0.10"
+chacha20poly1305 = "0.10"
+# Ephemeral-key entropy for the DHKEM encapsulation (SPEC §5.1 forward secrecy). wasm target needs
+# the `js` feature (WU5 flags it).
+getrandom = "0.2"
 
 [dev-dependencies]
 # Deterministic KAT material derived from a hashed seed — never a hard-coded literal (CodeQL).
-sha2 = "0.10"
 rand_chacha = "0.3"
 rand_core = "0.6"
