@@ -10,8 +10,20 @@ Stack: **dig-gossip** (transport) → **dig-message** (this crate: envelope + ty
 streaming + e2e seal) → **dig-identity** (identity) → dig-chat / dig-email /
 dig-video-chat / RPC (message types that extend this base).
 
-Security: mTLS at the transport **plus** payloads e2e-sealed to the recipient's
-dig-identity encryption key (X25519, slot 0x0011) — a TLS-terminating relay sees only
-ciphertext (CLAUDE.md §5.4). Canonical Chia types via `chia-wallet-sdk`.
+Security: mTLS at the transport **plus** payloads e2e-sealed to the recipient using the
+ONE Chia BLS12-381 identity key (dig-identity slot 0x0010) — its G2 signature
+authenticates the sender and a DHKEM over its G1 group seals the payload (no X25519, no
+Ed25519), so a TLS-terminating relay sees only ciphertext (CLAUDE.md §5.4). Canonical
+Chia types via `chia-protocol` / `chia-wallet-sdk`.
 
-Design + DAG: DIG-Network/dig_ecosystem#796. SPEC.md is normative (forthcoming).
+Wire: a compact, byte-deterministic Chia-Streamable binary format (never JSON), payload
+compressed (raw or zstd) BEFORE the seal, length-framed and size-bounded. `SPEC.md` is
+the normative contract.
+
+Status — **WU1 shipped** (this crate): the crypto-free foundation — envelope +
+`InnerMessage` structs, framing + size bounds, the compression codec, and the KAT
+harness. The seal + BLS sender-signature (WU2), type registry (WU3), streaming state
+machine (WU4), and wasm/JS bindings (WU5) follow; the fields they populate are already
+final on the wire.
+
+Design + DAG: DIG-Network/dig_ecosystem#796.
