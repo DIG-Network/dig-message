@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [0.3.0] - 2026-07-19
+
+### Features
+- **seal:** WU2 e2e DHKEM-G1 auth-seal + BLS G2 sig + replay/expiry pipeline (#1160) (#4)
+
 ## [0.2.0] - 2026-07-19
 
 ### Features
