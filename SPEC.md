@@ -6,8 +6,10 @@ authoritative contract an independent reimplementation is built against. Key wor
 
 Status: skeleton (design frozen by DIG-Network/dig_ecosystem#796 / #811, amended 2026-07-19 to a
 COMPRESSED BINARY format — compress-before-seal, additive compression-algo negotiation, decompression-
-bomb guard — and to a UNIVERSALLY SIGNED + REPLAY-PROTECTED format — mandatory Ed25519 sender-signature
-inside the seal on EVERY message/frame + a bounded sliding-window anti-replay scheme; byte-level KAT
+bomb guard — to a UNIVERSALLY SIGNED + REPLAY-PROTECTED format — mandatory Ed25519 sender-signature
+inside the seal on EVERY message/frame + a bounded sliding-window anti-replay scheme — and to an
+HPKE AUTH-MODE seal — the envelope is openable ONLY by the recipient private key + the sender public
+key (bound to both keypairs at the KEM); byte-level KAT
 vectors are filled during WU1-WU5 implementation, marked [KAT: ...] below). The design decisions herein
 are final.
 
@@ -193,8 +195,16 @@ mTLS is assumed at the dig-gossip transport. The dig-message sealed region is AD
 recipient identity encryption key so any TLS-terminating relay/forwarder sees only ciphertext.
 
 ### 5.1 Cipher suite (vetted; NEVER invented)
-- HPKE (RFC 9180), ciphersuite: DHKEM(X25519, HKDF-SHA256) + HKDF-SHA256 + ChaCha20Poly1305. Recipient
-  public key = the recipient DID slot 0x0011 X25519 key (resolved via dig-identity).
+- HPKE (RFC 9180) in AUTH mode (mode_auth, RFC 9180 section 5.1.1), ciphersuite: DHKEM(X25519,
+  HKDF-SHA256) [auth variant] + HKDF-SHA256 + ChaCha20Poly1305. The sender seals with
+  SetupAuthS(pkR, skS) using the recipient's X25519 public key (recipient DID slot 0x0011, resolved via
+  dig-identity) AND the SENDER's OWN static X25519 private key (sender DID slot 0x0011). The recipient
+  opens with SetupAuthR(enc, skR, pkS) using their X25519 private (0x0011) AND the sender's X25519
+  PUBLIC key. The envelope is therefore cryptographically bound to BOTH keypairs: opening REQUIRES the
+  recipient private key AND the correct sender public key — no third party can open it, and an open with
+  a wrong/absent sender pubkey FAILS. mode_auth is NOT mode_base: base (anonymous-sender) HPKE is
+  FORBIDDEN for directed dig-messages (all directed messages use auth mode; the only unsealed traffic is
+  the section 5.4 public-broadcast exemption).
 - Sender authentication = Ed25519 (slot 0x0010) signature, MANDATORY and UNIVERSAL: EVERY dig-message
   — one-shot, request, response, and every streaming frame (OPEN / OPEN_ACK / DATA / CREDIT / CLOSE /
   CLOSE_ACK / RESET) — carries a sender signature. No unsigned or bad-signature message/frame is EVER
@@ -207,14 +217,23 @@ recipient identity encryption key so any TLS-terminating relay/forwarder sees on
   fields (0 for non-stream messages) and compressed_payload_hash is the hash of the on-the-wire
   compressed payload bytes. Binding hpke_enc (the HPKE encapsulated key) prevents KEM-reuse/replay across
   recipients; binding counter + timestamp_ms is the anti-replay commitment (section 5.6); binding
-  stream_frame + stream_seq prevents per-frame replay/reorder/cross-frame splice (section 5.3). (HPKE
-  mode_base for encryption; sender-auth via the Ed25519 signature, NOT HPKE mode_auth, because the
-  authenticating identity is the DID Ed25519 key.)
+  stream_frame + stream_seq prevents per-frame replay/reorder/cross-frame splice (section 5.3). The Ed25519 signature is
+  KEPT ALONGSIDE HPKE auth mode — the two are DISTINCT, both required (section 5.7): HPKE auth mode gives
+  DENIABLE sender-authentication + KEM-level confidentiality binding to both keypairs; the Ed25519
+  signature gives TRANSFERABLE NON-REPUDIATION (a third party can verify the sender signed). The sig is
+  computed over the transcript above (plaintext + replay token + header), then the whole InnerMessage is
+  HPKE-auth-sealed.
 
 ### 5.2 SealedPayload (Streamable)
-{ hpke_enc: [u8;32], ciphertext: Vec<u8> } where ciphertext = HPKE.Seal(recipient_0x0011, aad =
-cleartext-header-bytes, pt = InnerMessage). Binding the cleartext header as AAD prevents an on-path party
-from altering routing metadata. InnerMessage (Streamable) = { message_type: u32, correlation_id: Bytes32,
+{ hpke_enc: [u8;32], ciphertext: Vec<u8> } where (enc=hpke_enc, ctx) = SetupAuthS(pkR=recipient_0x0011,
+skS=sender_0x0011_priv) and ciphertext = ctx.Seal(aad = cleartext-header-bytes, pt = InnerMessage). The
+recipient computes ctx = SetupAuthR(hpke_enc, skR=recipient_0x0011_priv, pkS=sender_0x0011_pub) and
+ctx.Open — so BOTH the recipient private key and the sender public key are required to open (section 5.1
+auth mode). To resolve pkS the recipient reads the `sender` DID from the cleartext header (which is bound
+as HPKE AAD, so it cannot be altered on-path) and resolves that DID's 0x0011 X25519 public key via
+dig-identity (at the `sender_epoch` key epoch) BEFORE opening; an unknown/unresolvable sender DID or a
+mismatched sender key -> open FAILS (fail-closed). Binding the cleartext header as AAD prevents an
+on-path party from altering routing metadata. InnerMessage (Streamable) = { message_type: u32, correlation_id: Bytes32,
 compression: u8, uncompressed_len: u32, counter: u64, timestamp_ms: u64, payload: Vec<u8>,
 sender_sig: [u8;64] } where `payload` is the COMPRESSED type-payload bytes (section 1.1), `compression`
 is the algorithm id, `uncompressed_len` is the declared original length (the bomb-guard bound),
@@ -233,8 +252,10 @@ sealed AND to its freshness.
 
 ### 5.3 Streaming keys
 The STREAM OPEN seal establishes a per-stream secret (HPKE export, RFC 9180 section 5.3, exporter_context
-= "dig-message/stream/v1" || correlation_id || hpke_enc). Binding hpke_enc (fresh per OPEN) makes the
-per-stream key unique per session even if a correlation_id ever recurred, so a frame from a prior
+= "dig-message/stream/v1" || correlation_id || hpke_enc), where the OPEN HPKE context is the auth-mode
+context (SetupAuthS/SetupAuthR, section 5.1) so the exported per-stream secret is ALSO bound to both the
+sender and recipient keypairs. Binding hpke_enc (fresh per OPEN) makes the per-stream key unique per
+session even if a correlation_id ever recurred, so a frame from a prior
 session can never be decrypted or injected into a new one (cross-session replay defense). EVERY stream
 frame (OPEN/OPEN_ACK/DATA/CREDIT/CLOSE/CLOSE_ACK/RESET) is Ed25519-signed inside its seal per section 5.1,
 with the transcript binding stream_frame + stream_seq, so no frame can be replayed, reordered, injected,
@@ -277,7 +298,9 @@ SPEC forbids the configurations where it would:
   envelope; a tampered-AAD/tampered-sig rejection vector; a wrong-recipient decrypt-fail vector;
   a COMPRESSED (id=1) compress->seal->open->decompress round-trip == original; a raw (id=0) round-trip;
   an unknown-compression-id-rejected vector; a decompression-bomb-rejected vector (declared/actual
-  decompressed size > MAX_DECOMPRESSED_BYTES -> clean reject, no OOM).]
+  decompressed size > MAX_DECOMPRESSED_BYTES -> clean reject, no OOM); an HPKE-AUTH open SUCCEEDS with
+  (recipient priv 0x0011 + correct sender pub 0x0011); an open with a WRONG sender public key -> FAIL; an
+  open with the wrong recipient key -> FAIL.]
 
 ### 5.6 Replay protection (mandatory, ALL messages — NORMATIVE)
 
@@ -321,13 +344,35 @@ all-required properties. The scheme (pinned):
   -> REJECT; a nonce/counter-flood does NOT grow per-sender state beyond the fixed bitmap and does NOT
   grow the sender table beyond MAX_TRACKED_SENDERS.]
 
+### 5.7 Three composed, distinct guarantees (NORMATIVE)
+
+A directed dig-message composes THREE independent security properties; all are required and none
+substitutes for another:
+
+1. HPKE AUTH mode (section 5.1) — CONFIDENTIALITY + DENIABLE sender-auth bound at the KEM to BOTH
+   keypairs: the envelope opens only with the recipient private key AND the correct sender public key.
+   This is symmetric/deniable (either party could have produced the AEAD tag), so it authenticates the
+   sender TO THE RECIPIENT but is not transferable to a third party.
+2. Ed25519 (0x0010) inner signature (section 5.1/5.2) — TRANSFERABLE NON-REPUDIATION: a third party
+   (given the transcript) can verify the sender signed. Kept alongside auth mode precisely because auth
+   mode alone is deniable.
+3. Anti-replay (section 5.6) — FRESHNESS: the signed+sealed counter + timestamp + sliding-window dedup
+   reject replays/stale messages, which neither confidentiality nor a signature alone prevents.
+
+Ordering: the sender computes the Ed25519 signature over the transcript (which already binds the replay
+token + header + compressed payload), places it in InnerMessage, then HPKE-auth-seals the whole. The
+receiver reverses it: SetupAuthR + Open (needs sender pubkey) -> verify Ed25519 sig -> anti-replay check
+-> decompress.
+
 ## 6. Threat model (NORMATIVE summary)
 
 | Threat | Mitigation |
 |---|---|
-| Curious/compromised relay reads content | HPKE seal to recipient 0x0011; relay sees only ciphertext + routing metadata (section 5) |
+| Curious/compromised relay reads content | HPKE AUTH-mode seal bound to recipient 0x0011 + sender 0x0011; opening needs the recipient private key AND the sender public key; relay sees only ciphertext + routing metadata (section 5.1) |
 | On-path tampering of routing metadata | Cleartext header bound as HPKE AAD (section 5.2) |
 | Sender spoofing / signature-stripping | MANDATORY Ed25519 (0x0010) signature on EVERY message/frame over the full transcript, verified against the resolved DID; unsigned/bad-sig -> REJECT fail-closed (section 5.1/5.6) |
+| Sender impersonation at the KEM / forged-origin ciphertext | HPKE auth mode binds the ciphertext to the sender's 0x0011 static key; a party lacking skS cannot produce an envelope that opens under (skR, pkS) (section 5.1) |
+| Deniability vs non-repudiation | Auth mode is deniable (recipient-only auth); the inner Ed25519 sig adds transferable non-repudiation — both intentionally present (section 5.7) |
 | Type-confusion / payload splicing | message_type + correlation_id re-bound inside the seal, checked == header (section 5.2) |
 | Cross-recipient replay of a sealed message | Transcript binds recipient + hpke_enc (section 5.1) |
 | Stream chunk replay/reorder/injection | Monotonic seq = AEAD nonce; per-stream derived key (section 5.3) |
@@ -353,5 +398,8 @@ pinned params (section 1.2); (f) compresses before sealing per the section 1 pip
 section 1.1 decompression-bomb guard + the section 5.5 single-context compression boundary; (g) signs
 EVERY message/frame with the Ed25519 sender key and rejects any unsigned/bad-signature message
 fail-closed (section 5.1); (h) enforces the section 5.6 anti-replay scheme (counter + freshness window +
-bounded sliding-window dedup) and passes its replay/stale/reorder/cross-session/flood KATs. SPEC.md, docs.dig.net protocol page, and superproject SYSTEM.md MUST agree
+bounded sliding-window dedup) and passes its replay/stale/reorder/cross-session/flood KATs; (i) seals
+directed messages with HPKE AUTH mode (SetupAuthS/SetupAuthR) so an open requires the recipient private
+key AND the correct sender public key, rejects a wrong-sender-key open, and NEVER uses base mode for a
+directed message (section 5.1). SPEC.md, docs.dig.net protocol page, and superproject SYSTEM.md MUST agree
 (ecosystem section 4.2 layering).
