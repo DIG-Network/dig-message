@@ -4,8 +4,10 @@ Normative specification of the DIG Network generic base message protocol: the ON
 streamable, e2e-sealed envelope every DIRECTED (1:1 / group) peer-to-peer message rides. The
 authoritative contract an independent reimplementation is built against. Key words per RFC 2119.
 
-Status: skeleton (design frozen by DIG-Network/dig_ecosystem#796 / #811; byte-level KAT vectors are
-filled during WU1-WU5 implementation, marked [KAT: ...] below). The design decisions herein are final.
+Status: skeleton (design frozen by DIG-Network/dig_ecosystem#796 / #811, amended 2026-07-19 to a
+COMPRESSED BINARY format — compress-before-seal, additive compression-algo negotiation, decompression-
+bomb guard; byte-level KAT vectors are filled during WU1-WU5 implementation, marked [KAT: ...] below).
+The design decisions herein are final.
 
 ## 0. Scope, stack position, and the two-wires reconciliation (NORMATIVE)
 
@@ -40,16 +42,65 @@ consensus broadcast). It rides the dig-gossip directed seam (send_to / request /
 helper). dig-gossip already exposes directed unicast (GossipHandle::send_to, ::request) beside
 broadcast; the streaming helper is added in WU6.
 
-## 1. Encoding & framing (NORMATIVE)
+## 1. Encoding, framing & compression (NORMATIVE)
 
-- Encoding = Chia Streamable. The envelope and every sub-structure are Chia Streamable (canonical,
-  byte-deterministic, length-prefixed for variable regions) so Rust, wasm, and JS agree byte-for-byte
-  (reuse chia-protocol / chia-wallet-sdk Streamable; never hand-roll framing).
+- Compact BINARY format. dig-message is a compact binary wire format, NOT a text/JSON format. The
+  envelope and every sub-structure are Chia Streamable (canonical, byte-deterministic, length-prefixed
+  for variable regions) so Rust, wasm, and JS agree byte-for-byte (reuse chia-protocol /
+  chia-wallet-sdk Streamable; never hand-roll framing, never emit JSON/text on the wire).
+- Payload pipeline (NORMATIVE ordering, security-critical): serialize the type payload (Streamable
+  bytes) -> COMPRESS (section 1.1) -> e2e-SEAL (HPKE, section 5). Compression MUST happen BEFORE the
+  seal: HPKE ciphertext is high-entropy and incompressible, so compressing after the seal is useless;
+  compressing the plaintext first is the only placement that gains size. The receiver reverses it:
+  open seal -> bomb-guard check -> decompress -> decode payload.
 - Length-framed + size-bounded. The outer DigMessage is already length-framed by dig-protocol;
-  dig-message re-declares a hard MAX_ENVELOPE_BYTES cap (default 16 MiB; stream chunks capped separately,
-  section 3) and a receiver MUST reject an over-cap or truncated envelope before decoding.
+  dig-message re-declares a hard MAX_ENVELOPE_BYTES cap (default 16 MiB, measured on the on-wire
+  compressed+sealed frame) and a MAX_DECOMPRESSED_BYTES cap (default 64 MiB per message; stream chunks
+  capped separately, section 3). A receiver MUST reject an over-cap or truncated envelope before
+  decoding, and MUST enforce MAX_DECOMPRESSED_BYTES BEFORE and DURING decompression (section 1.1
+  decompression-bomb guard).
 - Canonical types. DID identifiers are Bytes32 (identity singleton launcher_id) via
   chia-protocol/chia-wallet-sdk. Keys are the raw 32-byte X25519 (0x0011) / Ed25519 (0x0010) forms.
+
+### 1.1 Compression layer (additive negotiation + bomb guard, NORMATIVE)
+
+Compression is applied to the Streamable payload bytes INSIDE the seal (the compressed bytes are the
+sealed plaintext; the algorithm id and original length are carried in the sealed InnerMessage,
+section 5.2 — so they are AEAD-authenticated and NOT relay-visible, adding no metadata leak).
+
+- Algorithm id (u8, additive per section 5.1). Once assigned, an id is NEVER renumbered or repurposed.
+
+  | id | Algorithm | Support | Use |
+  |---|---|---|---|
+  | 0 | none / raw | MANDATORY (every impl MUST support) | Small or incompressible payloads (section below). |
+  | 1 | zstd | RECOMMENDED default | General payloads above the raw threshold. Level PINNED = 3 (zstd default; deterministic, no dictionary). |
+  | 2..=63 | reserved (standard algos) | — | Future standard codecs (e.g. brotli), assigned additively. |
+  | 64..=255 | reserved (experimental/vendor) | — | Never shipped as canonical. |
+
+- Raw threshold. A sender MUST use id=0 (raw) when the payload is below MIN_COMPRESS_BYTES
+  (default 64 bytes) OR when compression does not shrink it (compressed length >= raw length —
+  incompressible/already-compressed data). Otherwise it SHOULD use id=1 (zstd). This keeps small and
+  incompressible payloads from paying a compression header/expansion penalty.
+- Unknown-id handling (never crash). A receiver that does not recognize the compression id MUST fail
+  cleanly: UNSUPPORTED_COMPRESSION for request/stream, silent drop for one-shot (mirrors the
+  section 4 unknown-type rule). It MUST NOT panic or attempt to decompress with a wrong codec.
+- Decompression-bomb guard (HARD). The sealed InnerMessage carries uncompressed_len:u32 (the declared
+  original length). Before decompressing, a receiver MUST reject the frame if uncompressed_len >
+  MAX_DECOMPRESSED_BYTES. During decompression it MUST bound the output stream to MAX_DECOMPRESSED_BYTES
+  and abort (reject the frame) if the decoder tries to exceed that OR if the actual decoded length !=
+  uncompressed_len. A hostile peer MUST NOT be able to OOM the host via a compression bomb.
+- Codec = a byte-deterministic zstd usable from Rust AND wasm/JS (section 1.2). id=0 is the trivial
+  identity codec (payload bytes verbatim).
+
+### 1.2 wasm/JS codec parity (NORMATIVE)
+
+The zstd codec (id=1) MUST have a wasm/JS-compatible implementation so browser/extension peers encode
+and decode byte-identically to native Rust peers. Rust uses the `zstd` crate (libzstd bindings) pinned
+to level 3, no dictionary, single-frame; the wasm/JS target uses a WASM build of libzstd
+(e.g. `@bokuweb/zstd-wasm` / a vendored `libzstd` compiled to wasm) at the SAME level/params. Because
+compression happens before the seal and the compressed bytes are what get AEAD-authenticated, the two
+targets MUST produce identical compressed bytes for the pinned params — a Rust<->wasm/JS byte-agreement
+KAT (section 7, WU5) proves it. id=0 (raw) is trivially identical across targets.
 
 ## 2. Base envelope (byte-level, NORMATIVE)
 
@@ -69,8 +120,10 @@ DigMessageEnvelope (Streamable), field order normative:
 
 The header fields (1-8) are cleartext envelope metadata (a relay needs recipient to route and
 correlation_id/stream to multiplex). message_type is ALSO cleartext (routing) AND re-bound inside the
-seal (section 5) to prevent type-confusion. No payload content is ever cleartext.
-[KAT: golden envelope bytes for each shape.]
+seal (section 5) to prevent type-confusion. No payload content is ever cleartext. The compression
+algorithm id and the uncompressed length live INSIDE the seal (section 5.2 InnerMessage), NOT in the
+cleartext header — so compression metadata is AEAD-authenticated and invisible to the relay.
+[KAT: golden envelope bytes for each shape, including a raw(id=0) and a zstd(id=1) sealed payload.]
 
 ## 3. The three interaction shapes + streaming state machine (NORMATIVE)
 
@@ -148,25 +201,59 @@ recipient identity encryption key so any TLS-terminating relay/forwarder sees on
 { hpke_enc: [u8;32], ciphertext: Vec<u8> } where ciphertext = HPKE.Seal(recipient_0x0011, aad =
 cleartext-header-bytes, pt = InnerMessage). Binding the cleartext header as AAD prevents an on-path party
 from altering routing metadata. InnerMessage (Streamable) = { message_type: u32, correlation_id: Bytes32,
-payload: Vec<u8>, sender_sig: [u8;64] }; a receiver MUST verify sender_sig against the resolved sender
-0x0010 key AND that inner message_type/correlation_id equal the cleartext header (anti type-confusion /
-anti splice).
+compression: u8, uncompressed_len: u32, payload: Vec<u8>, sender_sig: [u8;64] } where `payload` is the
+COMPRESSED type-payload bytes (section 1.1), `compression` is the algorithm id, and `uncompressed_len`
+is the declared original length (the bomb-guard bound). A receiver MUST (a) verify sender_sig against
+the resolved sender 0x0010 key; (b) check inner message_type/correlation_id equal the cleartext header
+(anti type-confusion / anti splice); (c) reject if uncompressed_len > MAX_DECOMPRESSED_BYTES; then
+(d) decompress `payload` per `compression` under the section 1.1 output bound and check the decoded
+length == uncompressed_len. Because compression + its parameters live inside the AEAD-authenticated
+InnerMessage, they cannot be tampered by a relay. The sender_sig transcript (section 5.1) covers the
+COMPRESSED payload_hash (plaintext_hash = hash of the sealed InnerMessage plaintext incl. the compressed
+bytes), so the signature commits to exactly what is sealed.
 
 ### 5.3 Streaming keys
 The STREAM OPEN seal establishes a per-stream secret (HPKE export, RFC 9180 section 5.3, exporter_context
 = "dig-message/stream/v1" || correlation_id). Subsequent DATA chunks are AEAD-sealed (ChaCha20Poly1305)
 under keys derived from that secret with nonce = seq (the monotonic section 3 counter), so per-chunk HPKE
-is avoided while confidentiality + ordering + replay-resistance hold. The base spec provides this
-per-stream secure channel; a higher layer (dig-chat #768) MAY layer a Double Ratchet over its payload.
+is avoided while confidentiality + ordering + replay-resistance hold. Each DATA chunk is compressed
+(section 1.1) INDEPENDENTLY before its AEAD seal — one compression context per chunk, never a shared
+running context across chunks (see the compress-then-encrypt boundary, section 5.5). The stream's
+compression algorithm id is fixed at OPEN (carried in the sealed OPEN InnerMessage); each DATA chunk
+declares its own uncompressed_len for the per-chunk MAX_CHUNK_DECOMPRESSED_BYTES bomb guard
+(default = MAX_CHUNK_BYTES). The base spec provides this per-stream secure channel; a higher layer
+(dig-chat #768) MAY layer a Double Ratchet over its payload.
 
 ### 5.4 Public-broadcast exemption
 Consensus broadcast (opcodes 200-219: blocks, transactions, attestations, checkpoints — addressed to ALL
 peers) has no single recipient key and is NOT dig-message-sealed; it stays mTLS-authenticated + signed.
 dig-message governs DIRECTED (1:1/group) messaging only.
 
+### 5.5 Compress-then-encrypt threat boundary (CRIME/BREACH class, NORMATIVE)
+
+Compressing before encrypting can, in the general TLS/HTTP setting, leak plaintext via ciphertext length
+under an adaptive-chosen-plaintext attacker (CRIME/BREACH): the attacker repeatedly injects data into a
+compression context that ALSO contains a stable secret, and reads the compressed length to guess the
+secret byte-by-byte. That attack class does NOT apply to dig-message discrete sealed messages, and the
+SPEC forbids the configurations where it would:
+
+- Each message (and each stream chunk) is compressed in its OWN, fresh compression context, then sealed
+  with a FRESH per-message HPKE context (or a fresh per-chunk AEAD nonce over a per-stream key). There is
+  no long-lived compression context that mixes a stable secret with attacker-varied inputs across many
+  probes, and the length side channel is per-discrete-message, not a repeated oracle over one secret.
+- FORBIDDEN (MUST NOT): compressing attacker-influenced data together WITH secret data in a single
+  compression context, or streaming a stable secret repeatedly alongside attacker-chosen data in one
+  running compression context. An implementation MUST keep every compression context single-message /
+  single-chunk (section 5.3) — this is the boundary that keeps compress-before-seal provably safe here.
+- Payloads that genuinely interleave a per-connection secret with attacker-chosen content in one buffer
+  MUST set compression=0 (raw); they are outside the safe regime above.
+
 - [KAT: seal/open round-trip with fixed keys (test nonces DERIVED from a hashed seed, never integer
   literals — CodeQL); a relay-sees-only-ciphertext test asserting no plaintext substring in the on-wire
-  envelope; a tampered-AAD/tampered-sig rejection vector; a wrong-recipient decrypt-fail vector.]
+  envelope; a tampered-AAD/tampered-sig rejection vector; a wrong-recipient decrypt-fail vector;
+  a COMPRESSED (id=1) compress->seal->open->decompress round-trip == original; a raw (id=0) round-trip;
+  an unknown-compression-id-rejected vector; a decompression-bomb-rejected vector (declared/actual
+  decompressed size > MAX_DECOMPRESSED_BYTES -> clean reject, no OOM).]
 
 ## 6. Threat model (NORMATIVE summary)
 
@@ -179,6 +266,9 @@ dig-message governs DIRECTED (1:1/group) messaging only.
 | Cross-recipient replay of a sealed message | Transcript binds recipient + hpke_enc (section 5.1) |
 | Stream chunk replay/reorder/injection | Monotonic seq = AEAD nonce; per-stream derived key (section 5.3) |
 | Resource exhaustion (huge msg / unbounded stream) | MAX_ENVELOPE_BYTES / MAX_CHUNK_BYTES / credit window (section 1, 3) |
+| Decompression bomb (small frame -> huge output OOM) | uncompressed_len declared + checked; output bounded to MAX_DECOMPRESSED_BYTES; abort on overrun/mismatch (section 1.1) |
+| Compression side channel (CRIME/BREACH) | Per-message/per-chunk fresh compression + fresh seal context; no secret+attacker-data in one context; raw(id=0) for interleaved-secret payloads (section 5.5) |
+| Unknown compression algorithm id | Clean reject (UNSUPPORTED_COMPRESSION) / drop, never panic or mis-decode (section 1.1) |
 | Key rotation / stale key | sender_epoch (0x0013) disambiguates; receiver resolves the epoch key |
 | Unknown/newer version or type | Clean reject/drop, never panic (section 2, 4) |
 | Metadata leakage (who talks to whom) | Documented residual: envelope reveals sender/recipient DID + timing to the relay; out of base scope (a future sealed-sender/onion layer MAY reduce it) |
@@ -188,6 +278,8 @@ dig-message governs DIRECTED (1:1/group) messaging only.
 An implementation conforms iff it (a) encodes/decodes every section 2/3 structure byte-identically to the
 golden KATs; (b) seals/opens per section 5 and passes the relay-ciphertext + tamper + wrong-recipient
 KATs; (c) drives the section 3 streaming state machine incl. backpressure + half-close + cancel;
-(d) handles unknown version/type per section 2/4 without panic; (e) agrees byte-for-byte across the Rust
-and wasm/JS targets. SPEC.md, docs.dig.net protocol page, and superproject SYSTEM.md MUST agree
+(d) handles unknown version/type/compression-id per section 1.1/2/4 without panic; (e) agrees
+byte-for-byte across the Rust and wasm/JS targets, INCLUDING the zstd(id=1) compressed bytes for the
+pinned params (section 1.2); (f) compresses before sealing per the section 1 pipeline and enforces the
+section 1.1 decompression-bomb guard + the section 5.5 single-context compression boundary. SPEC.md, docs.dig.net protocol page, and superproject SYSTEM.md MUST agree
 (ecosystem section 4.2 layering).
