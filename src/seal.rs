@@ -107,9 +107,18 @@ pub fn seal_message(params: &SealParams) -> Result<DigMessageEnvelope> {
 /// Seal with a caller-provided ephemeral secret (deterministic KATs). Prefer [`seal_message`] in
 /// production — a fresh random ephemeral per message is what gives forward secrecy (SPEC §5.1).
 ///
+/// ⚠️ **INTERNAL USE ONLY** — restricted to `pub(crate)` to prevent accidental nonce-reuse in
+/// production code. Reusing ephemeralss breaks forward secrecy (ChaCha20Poly1305 catastrophic failure)
+/// and is incompatible with WU4 streaming. Use [`seal_message`] instead, which auto-generates
+/// fresh ephemeralss. Deterministic KAT tests access this from within the crate (unit tests in
+/// this module, not integration tests).
+///
 /// # Errors
 /// As [`seal_message`].
-pub fn seal_with_ephemeral(params: &SealParams, esk: &SecretKey) -> Result<DigMessageEnvelope> {
+pub(crate) fn seal_with_ephemeral(
+    params: &SealParams,
+    esk: &SecretKey,
+) -> Result<DigMessageEnvelope> {
     // SPEC §1: compress BEFORE sealing (sealed ciphertext is incompressible).
     let compressed = compress_payload(params.payload)?;
 
@@ -802,5 +811,225 @@ mod tests {
         let opened =
             open_message(&bob.sk, &env1, resolver(alice.pub_key), &mut guard, NOW).unwrap();
         assert_eq!(opened.payload, b"random-ephemeral");
+    }
+
+    // ── WU2 deterministic-ephemeral KATs (golden vectors for integration testing) ──
+    // These moved from tests/kat.rs into the crate so they can access pub(crate) seal_with_ephemeral.
+    // Non-seal KATs stay in tests/kat.rs and use only the public seal_message API.
+
+    const KAT_NOW: u64 = 1_700_000_000_000;
+
+    fn b32_from_seed(tag: &[u8]) -> Bytes32 {
+        let seed: [u8; 32] = sha2::Sha256::digest(tag).into();
+        Bytes32::new(seed)
+    }
+
+    fn kat_sk(label: &str) -> SecretKey {
+        let seed: [u8; 32] = sha2::Sha256::digest(label.as_bytes()).into();
+        let msk = dig_identity::master_secret_key_from_seed(&seed);
+        dig_identity::derive_identity_sk(&msk)
+    }
+
+    fn kat_ephemeral(label: &str) -> SecretKey {
+        let seed: [u8; 32] = sha2::Sha256::digest(label.as_bytes()).into();
+        SecretKey::from_seed(&seed)
+    }
+
+    fn kat_resolver(pk: [u8; 48]) -> impl Fn(Bytes32, u32) -> Option<[u8; 48]> {
+        move |_did, _epoch| Some(pk)
+    }
+
+    fn kat_params<'a>(
+        sender_sk: &'a SecretKey,
+        sender: Bytes32,
+        recipient: Bytes32,
+        recipient_pub: &'a [u8; 48],
+        payload: &'a [u8],
+    ) -> SealParams<'a> {
+        SealParams {
+            sender_sk,
+            sender,
+            sender_epoch: 0,
+            recipient,
+            recipient_pub,
+            message_type: 0x0001_0101,
+            shape: InteractionShape::OneShot,
+            correlation_id: b32_from_seed(b"kat/corr"),
+            stream: None,
+            counter: 0,
+            timestamp_ms: KAT_NOW,
+            expires_at: 0,
+            payload,
+        }
+    }
+
+    #[test]
+    fn kat_seal_open_round_trip_raw_and_compressed() {
+        let alice = kat_sk("kat/seal/alice");
+        let bob = kat_sk("kat/seal/bob");
+        let (a_did, b_did) = (b32_from_seed(b"kat/a"), b32_from_seed(b"kat/b"));
+        let b_pub = public_key_bytes(&bob);
+
+        for (label, msg) in [
+            ("raw", b"hi".to_vec()),
+            (
+                "zstd",
+                (0..2048).map(|i| (i % 5) as u8).collect::<Vec<u8>>(),
+            ),
+        ] {
+            let params = kat_params(&alice, a_did, b_did, &b_pub, &msg);
+            let env = seal_with_ephemeral(&params, &kat_ephemeral(label)).unwrap();
+            let mut guard = ReplayGuard::new();
+            let opened = open_message(
+                &bob,
+                &env,
+                kat_resolver(public_key_bytes(&alice)),
+                &mut guard,
+                KAT_NOW,
+            )
+            .unwrap();
+            assert_eq!(opened.payload, msg, "{label} payload round-trips");
+        }
+    }
+
+    #[test]
+    fn kat_relay_sees_only_ciphertext() {
+        let alice = kat_sk("kat/leak/a");
+        let bob = kat_sk("kat/leak/b");
+        let secret = b"UNIQUE-PLAINTEXT-NEEDLE-XYZ";
+        let b_pub = public_key_bytes(&bob);
+        let params = kat_params(
+            &alice,
+            b32_from_seed(b"a"),
+            b32_from_seed(b"b"),
+            &b_pub,
+            secret,
+        );
+        let env = seal_with_ephemeral(&params, &kat_ephemeral("leak")).unwrap();
+        let wire = crate::envelope::encode_envelope(&env).unwrap();
+        assert!(wire.windows(secret.len()).all(|w| w != secret));
+    }
+
+    #[test]
+    fn kat_wrong_recipient_and_wrong_sender_reject() {
+        let alice = kat_sk("kat/wr/a");
+        let bob = kat_sk("kat/wr/b");
+        let eve = kat_sk("kat/wr/eve");
+        let b_pub = public_key_bytes(&bob);
+        let params = kat_params(
+            &alice,
+            b32_from_seed(b"a"),
+            b32_from_seed(b"b"),
+            &b_pub,
+            b"secret",
+        );
+        let env = seal_with_ephemeral(&params, &kat_ephemeral("wr")).unwrap();
+
+        let mut g1 = ReplayGuard::new();
+        assert_eq!(
+            open_message(
+                &eve,
+                &env,
+                kat_resolver(public_key_bytes(&alice)),
+                &mut g1,
+                KAT_NOW
+            )
+            .unwrap_err(),
+            MessageError::OpenFailed,
+            "wrong recipient key cannot open"
+        );
+        let mut g2 = ReplayGuard::new();
+        assert_eq!(
+            open_message(
+                &bob,
+                &env,
+                kat_resolver(public_key_bytes(&eve)),
+                &mut g2,
+                KAT_NOW
+            )
+            .unwrap_err(),
+            MessageError::OpenFailed,
+            "wrong sender key cannot open"
+        );
+    }
+
+    #[test]
+    fn kat_non_subgroup_kem_enc_rejected() {
+        let alice = kat_sk("kat/sg/a");
+        let bob = kat_sk("kat/sg/b");
+        let b_pub = public_key_bytes(&bob);
+        let params = kat_params(
+            &alice,
+            b32_from_seed(b"a"),
+            b32_from_seed(b"b"),
+            &b_pub,
+            b"x",
+        );
+        let mut env = seal_with_ephemeral(&params, &kat_ephemeral("sg")).unwrap();
+        env.sealed.kem_enc = Bytes48::new([0xFFu8; 48]);
+        let mut guard = ReplayGuard::new();
+        assert_eq!(
+            open_message(
+                &bob,
+                &env,
+                kat_resolver(public_key_bytes(&alice)),
+                &mut guard,
+                KAT_NOW
+            )
+            .unwrap_err(),
+            MessageError::InvalidPoint
+        );
+    }
+
+    #[test]
+    fn kat_replay_and_expiry() {
+        let alice = kat_sk("kat/re/a");
+        let bob = kat_sk("kat/re/b");
+        let a_pub = public_key_bytes(&alice);
+        let b_pub = public_key_bytes(&bob);
+        let (a_did, b_did) = (b32_from_seed(b"a"), b32_from_seed(b"b"));
+
+        // Replay: the same envelope twice -> second REJECT.
+        let env = seal_with_ephemeral(
+            &kat_params(&alice, a_did, b_did, &b_pub, b"x"),
+            &kat_ephemeral("re0"),
+        )
+        .unwrap();
+        let mut guard = ReplayGuard::new();
+        assert!(open_message(&bob, &env, kat_resolver(a_pub), &mut guard, KAT_NOW).is_ok());
+        assert_eq!(
+            open_message(&bob, &env, kat_resolver(a_pub), &mut guard, KAT_NOW).unwrap_err(),
+            MessageError::Replay
+        );
+
+        // Past-expires -> DISCARD.
+        let mut expiring_params = kat_params(&alice, a_did, b_did, &b_pub, b"x");
+        expiring_params.counter = 1;
+        expiring_params.expires_at = KAT_NOW + 1000;
+        let expiring = seal_with_ephemeral(&expiring_params, &kat_ephemeral("re1")).unwrap();
+        let mut g2 = ReplayGuard::new();
+        assert_eq!(
+            open_message(
+                &bob,
+                &expiring,
+                kat_resolver(a_pub),
+                &mut g2,
+                KAT_NOW + 5000
+            )
+            .unwrap_err(),
+            MessageError::Expired
+        );
+    }
+
+    #[test]
+    fn kat_self_addressed_round_trip() {
+        let me = kat_sk("kat/self");
+        let me_pub = public_key_bytes(&me);
+        let did = b32_from_seed(b"kat/self/did");
+        let params = kat_params(&me, did, did, &me_pub, b"note to self");
+        let env = seal_with_ephemeral(&params, &kat_ephemeral("self")).unwrap();
+        let mut guard = ReplayGuard::new();
+        let opened = open_message(&me, &env, kat_resolver(me_pub), &mut guard, KAT_NOW).unwrap();
+        assert_eq!(opened.payload, b"note to self");
     }
 }

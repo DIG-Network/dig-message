@@ -56,5 +56,5 @@ pub use registry::{
     BAND_DIG_VIDEO, BAND_EXPERIMENTAL, BAND_IPC, BAND_PEER_RPC, BAND_PRESENCE,
 };
 pub use replay::ReplayGuard;
-pub use seal::{open_message, seal_message, seal_with_ephemeral, OpenedMessage, SealParams};
+pub use seal::{open_message, seal_message, OpenedMessage, SealParams};
 pub use transcript::TranscriptFields;
