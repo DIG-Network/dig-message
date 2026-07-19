@@ -6,8 +6,10 @@ authoritative contract an independent reimplementation is built against. Key wor
 
 Status: skeleton (design frozen by DIG-Network/dig_ecosystem#796 / #811, amended 2026-07-19 to a
 COMPRESSED BINARY format — compress-before-seal, additive compression-algo negotiation, decompression-
-bomb guard; byte-level KAT vectors are filled during WU1-WU5 implementation, marked [KAT: ...] below).
-The design decisions herein are final.
+bomb guard — and to a UNIVERSALLY SIGNED + REPLAY-PROTECTED format — mandatory Ed25519 sender-signature
+inside the seal on EVERY message/frame + a bounded sliding-window anti-replay scheme; byte-level KAT
+vectors are filled during WU1-WU5 implementation, marked [KAT: ...] below). The design decisions herein
+are final.
 
 ## 0. Scope, stack position, and the two-wires reconciliation (NORMATIVE)
 
@@ -157,7 +159,10 @@ State machine (each direction tracked independently for half-close):
 - Half-close both ways: CLOSE closes the sending direction only; the peer keeps sending until it also
   sends CLOSE. Full close when both directions closed (or on RESET).
 - Chunk cap: MAX_CHUNK_BYTES (default 1 MiB).
-- [KAT: streaming round-trip; a CANCEL/RESET vector; a backpressure vector.]
+- Signed frames: EVERY stream frame is Ed25519-signed inside its seal (section 5.1) with the frame type
+  + seq bound; an unsigned/bad-sig/replayed/reordered frame is rejected (section 5.3/5.6).
+- [KAT: streaming round-trip; a CANCEL/RESET vector; a backpressure vector; a cross-session frame-replay
+  reject vector.]
 
 ## 4. Extensible type registry (NORMATIVE)
 
@@ -182,7 +187,7 @@ State machine (each direction tracked independently for half-close):
   them; dig-message never depends on a downstream crate.
 - [KAT: unknown-type-dropped (one-shot) + unknown-type-error (request) vectors.]
 
-## 5. Security — e2e seal to the recipient + sender authentication (HARD, ecosystem section 5.4)
+## 5. Security — e2e seal + universal sender signature + replay protection (HARD, ecosystem section 5.4)
 
 mTLS is assumed at the dig-gossip transport. The dig-message sealed region is ADDITIONALLY sealed to the
 recipient identity encryption key so any TLS-terminating relay/forwarder sees only ciphertext.
@@ -190,31 +195,50 @@ recipient identity encryption key so any TLS-terminating relay/forwarder sees on
 ### 5.1 Cipher suite (vetted; NEVER invented)
 - HPKE (RFC 9180), ciphersuite: DHKEM(X25519, HKDF-SHA256) + HKDF-SHA256 + ChaCha20Poly1305. Recipient
   public key = the recipient DID slot 0x0011 X25519 key (resolved via dig-identity).
-- Sender authentication = Ed25519 (slot 0x0010) signature, carried INSIDE the seal (so it is not
-  relay-visible and is bound to the encryption). The signature covers a domain-separated transcript:
-  "dig-message/v1" || version || message_type || correlation_id || sender || recipient || sender_epoch
-  || hpke_enc || plaintext_hash. Binding hpke_enc (the HPKE encapsulated key) prevents KEM-reuse/replay
-  across recipients. (HPKE mode_base for encryption; sender-auth via the Ed25519 signature, NOT HPKE
-  mode_auth, because the authenticating identity is the DID Ed25519 key.)
+- Sender authentication = Ed25519 (slot 0x0010) signature, MANDATORY and UNIVERSAL: EVERY dig-message
+  — one-shot, request, response, and every streaming frame (OPEN / OPEN_ACK / DATA / CREDIT / CLOSE /
+  CLOSE_ACK / RESET) — carries a sender signature. No unsigned or bad-signature message/frame is EVER
+  accepted (fail-closed, section 5.6). The signature is carried INSIDE the seal (so it is not
+  relay-visible and is bound to the encryption; only the recipient learns + verifies the sender). It
+  covers a domain-separated transcript that binds EVERYTHING (nothing malleable):
+  "dig-message/v1" || version || message_type || flags || correlation_id || sender || recipient ||
+  sender_epoch || counter || timestamp_ms || stream_frame || stream_seq || hpke_enc || compression ||
+  uncompressed_len || compressed_payload_hash — where stream_frame/stream_seq are the section 3 stream
+  fields (0 for non-stream messages) and compressed_payload_hash is the hash of the on-the-wire
+  compressed payload bytes. Binding hpke_enc (the HPKE encapsulated key) prevents KEM-reuse/replay across
+  recipients; binding counter + timestamp_ms is the anti-replay commitment (section 5.6); binding
+  stream_frame + stream_seq prevents per-frame replay/reorder/cross-frame splice (section 5.3). (HPKE
+  mode_base for encryption; sender-auth via the Ed25519 signature, NOT HPKE mode_auth, because the
+  authenticating identity is the DID Ed25519 key.)
 
 ### 5.2 SealedPayload (Streamable)
 { hpke_enc: [u8;32], ciphertext: Vec<u8> } where ciphertext = HPKE.Seal(recipient_0x0011, aad =
 cleartext-header-bytes, pt = InnerMessage). Binding the cleartext header as AAD prevents an on-path party
 from altering routing metadata. InnerMessage (Streamable) = { message_type: u32, correlation_id: Bytes32,
-compression: u8, uncompressed_len: u32, payload: Vec<u8>, sender_sig: [u8;64] } where `payload` is the
-COMPRESSED type-payload bytes (section 1.1), `compression` is the algorithm id, and `uncompressed_len`
-is the declared original length (the bomb-guard bound). A receiver MUST (a) verify sender_sig against
-the resolved sender 0x0010 key; (b) check inner message_type/correlation_id equal the cleartext header
-(anti type-confusion / anti splice); (c) reject if uncompressed_len > MAX_DECOMPRESSED_BYTES; then
-(d) decompress `payload` per `compression` under the section 1.1 output bound and check the decoded
-length == uncompressed_len. Because compression + its parameters live inside the AEAD-authenticated
-InnerMessage, they cannot be tampered by a relay. The sender_sig transcript (section 5.1) covers the
-COMPRESSED payload_hash (plaintext_hash = hash of the sealed InnerMessage plaintext incl. the compressed
-bytes), so the signature commits to exactly what is sealed.
+compression: u8, uncompressed_len: u32, counter: u64, timestamp_ms: u64, payload: Vec<u8>,
+sender_sig: [u8;64] } where `payload` is the COMPRESSED type-payload bytes (section 1.1), `compression`
+is the algorithm id, `uncompressed_len` is the declared original length (the bomb-guard bound),
+`counter` + `timestamp_ms` are the anti-replay fields (section 5.6), and `sender_sig` is the MANDATORY
+Ed25519 signature (section 5.1) — every InnerMessage carries it, none is optional. A receiver MUST, in
+order: (a) verify sender_sig against the resolved sender 0x0010 key — an absent, malformed, or
+non-verifying signature is a REJECT, never accepted (fail-closed); (b) check inner
+message_type/correlation_id equal the cleartext header (anti type-confusion / anti splice);
+(c) run the anti-replay check (section 5.6) on (sender, sender_epoch, counter, timestamp_ms) and REJECT
+a replay/stale message; (d) reject if uncompressed_len > MAX_DECOMPRESSED_BYTES; then (e) decompress
+`payload` per `compression` under the section 1.1 output bound and check the decoded length ==
+uncompressed_len. Because every field lives inside the AEAD-authenticated + signed InnerMessage, none can
+be tampered by a relay. The sender_sig transcript (section 5.1) covers the compressed payload hash + the
+anti-replay fields + the envelope-authenticated header, so the signature commits to exactly what is
+sealed AND to its freshness.
 
 ### 5.3 Streaming keys
 The STREAM OPEN seal establishes a per-stream secret (HPKE export, RFC 9180 section 5.3, exporter_context
-= "dig-message/stream/v1" || correlation_id). Subsequent DATA chunks are AEAD-sealed (ChaCha20Poly1305)
+= "dig-message/stream/v1" || correlation_id || hpke_enc). Binding hpke_enc (fresh per OPEN) makes the
+per-stream key unique per session even if a correlation_id ever recurred, so a frame from a prior
+session can never be decrypted or injected into a new one (cross-session replay defense). EVERY stream
+frame (OPEN/OPEN_ACK/DATA/CREDIT/CLOSE/CLOSE_ACK/RESET) is Ed25519-signed inside its seal per section 5.1,
+with the transcript binding stream_frame + stream_seq, so no frame can be replayed, reordered, injected,
+or forged; the monotonic per-direction seq (section 3) is the replay index within a session. Subsequent DATA chunks are AEAD-sealed (ChaCha20Poly1305)
 under keys derived from that secret with nonce = seq (the monotonic section 3 counter), so per-chunk HPKE
 is avoided while confidentiality + ordering + replay-resistance hold. Each DATA chunk is compressed
 (section 1.1) INDEPENDENTLY before its AEAD seal — one compression context per chunk, never a shared
@@ -255,18 +279,63 @@ SPEC forbids the configurations where it would:
   an unknown-compression-id-rejected vector; a decompression-bomb-rejected vector (declared/actual
   decompressed size > MAX_DECOMPRESSED_BYTES -> clean reject, no OOM).]
 
+### 5.6 Replay protection (mandatory, ALL messages — NORMATIVE)
+
+Every non-broadcast dig-message is replay-protected. HPKE gives confidentiality + AEAD integrity, the
+Ed25519 signature gives non-repudiable sender-auth, and this section adds FRESHNESS — three distinct,
+all-required properties. The scheme (pinned):
+
+- Anti-replay fields (signed + sealed, section 5.2): `counter: u64` — a per-(sender -> recipient)
+  strictly-monotonic message counter the SENDER persists per recipient (starts at 0 for the first
+  message to that recipient, +1 each message, never reused, never decreases); `timestamp_ms: u64` —
+  sender wall-clock Unix milliseconds at send. Both are inside the seal and covered by the signature, so
+  neither is malleable by a relay.
+- Freshness window: FRESHNESS_WINDOW_MS (default 300_000 = +/-5 min). A receiver REJECTS a message whose
+  timestamp_ms is outside [now - FRESHNESS_WINDOW_MS, now + FRESHNESS_WINDOW_MS] (bounds clock skew and
+  caps how long replay state must be retained).
+- Sliding-window dedup (bounded, DoS-safe). Per (sender DID, sender_epoch) the receiver keeps O(1) state:
+  a `highest_counter: u64` plus a fixed-width bitmap window REPLAY_WINDOW (default 1024 bits) covering
+  [highest_counter - REPLAY_WINDOW + 1 .. highest_counter]. On receipt:
+  - counter > highest_counter -> ACCEPT, advance the window, set the new bit (in-order / new).
+  - highest_counter - REPLAY_WINDOW < counter <= highest_counter and its bit is UNSET -> ACCEPT, set the
+    bit (accepts in-window reordering).
+  - bit already SET, or counter <= highest_counter - REPLAY_WINDOW (too old) -> REJECT (duplicate/stale).
+  The bitmap is fixed-size, so a flood of distinct counters from one sender CANNOT grow per-sender state.
+- Memory bound (nonce-flood / Sybil DoS guard). The set of tracked senders is a bounded LRU capped at
+  MAX_TRACKED_SENDERS (default 100_000), evicting senders idle beyond FRESHNESS_WINDOW_MS first; a sender
+  whose state was evicted for staleness is re-admitted only by a fresh in-window message. Each new sender
+  entry requires a valid Ed25519 signature over a resolvable DID (section 5.1), so forging distinct
+  senders to exhaust the LRU is cryptographically costly, and the per-sender cost is a fixed bitmap. A
+  flood of distinct nonces/counters therefore cannot exhaust memory.
+- Streaming: within a session the per-direction monotonic `stream_seq` (section 3) is the replay index —
+  a receiver rejects a duplicate/old/gap seq; the per-stream key is bound to the fresh OPEN hpke_enc
+  (section 5.3) so no frame is replayable across sessions. The OPEN frame itself is covered by the
+  counter/timestamp scheme above.
+- Fail-closed: a message failing signature (section 5.1) OR the anti-replay check is DROPPED and never
+  delivered to the type handler.
+
+- [KAT: valid signed message verifies + accepts; a bad-signature vector -> REJECT; an absent/zeroed
+  signature -> REJECT; a byte-identical replay of an accepted message -> REJECT (dedup bit set); a stale
+  message (timestamp outside window / counter below the window) -> REJECT; an in-window reordered message
+  -> ACCEPT; a cross-session streaming-frame replay (frame from a prior OPEN injected into a new session)
+  -> REJECT; a nonce/counter-flood does NOT grow per-sender state beyond the fixed bitmap and does NOT
+  grow the sender table beyond MAX_TRACKED_SENDERS.]
+
 ## 6. Threat model (NORMATIVE summary)
 
 | Threat | Mitigation |
 |---|---|
 | Curious/compromised relay reads content | HPKE seal to recipient 0x0011; relay sees only ciphertext + routing metadata (section 5) |
 | On-path tampering of routing metadata | Cleartext header bound as HPKE AAD (section 5.2) |
-| Sender spoofing | Ed25519 (0x0010) signature over the transcript, verified against resolved DID (section 5.1) |
+| Sender spoofing / signature-stripping | MANDATORY Ed25519 (0x0010) signature on EVERY message/frame over the full transcript, verified against the resolved DID; unsigned/bad-sig -> REJECT fail-closed (section 5.1/5.6) |
 | Type-confusion / payload splicing | message_type + correlation_id re-bound inside the seal, checked == header (section 5.2) |
 | Cross-recipient replay of a sealed message | Transcript binds recipient + hpke_enc (section 5.1) |
 | Stream chunk replay/reorder/injection | Monotonic seq = AEAD nonce; per-stream derived key (section 5.3) |
 | Resource exhaustion (huge msg / unbounded stream) | MAX_ENVELOPE_BYTES / MAX_CHUNK_BYTES / credit window (section 1, 3) |
 | Decompression bomb (small frame -> huge output OOM) | uncompressed_len declared + checked; output bounded to MAX_DECOMPRESSED_BYTES; abort on overrun/mismatch (section 1.1) |
+| Message replay (resend a captured sealed message) | Signed+sealed per-sender monotonic counter + timestamp freshness window + bounded sliding-window dedup; duplicate/stale -> REJECT (section 5.6) |
+| Reflection / cross-session frame injection | Transcript binds recipient + hpke_enc + stream_frame/seq; per-stream key bound to the fresh OPEN hpke_enc; frame from another session/direction -> REJECT (section 5.3/5.6) |
+| Anti-replay state exhaustion (nonce/Sybil flood) | Fixed per-sender bitmap window (no growth per counter) + LRU-capped sender table (MAX_TRACKED_SENDERS) + valid-DID-signature admission (section 5.6) |
 | Compression side channel (CRIME/BREACH) | Per-message/per-chunk fresh compression + fresh seal context; no secret+attacker-data in one context; raw(id=0) for interleaved-secret payloads (section 5.5) |
 | Unknown compression algorithm id | Clean reject (UNSUPPORTED_COMPRESSION) / drop, never panic or mis-decode (section 1.1) |
 | Key rotation / stale key | sender_epoch (0x0013) disambiguates; receiver resolves the epoch key |
@@ -281,5 +350,8 @@ KATs; (c) drives the section 3 streaming state machine incl. backpressure + half
 (d) handles unknown version/type/compression-id per section 1.1/2/4 without panic; (e) agrees
 byte-for-byte across the Rust and wasm/JS targets, INCLUDING the zstd(id=1) compressed bytes for the
 pinned params (section 1.2); (f) compresses before sealing per the section 1 pipeline and enforces the
-section 1.1 decompression-bomb guard + the section 5.5 single-context compression boundary. SPEC.md, docs.dig.net protocol page, and superproject SYSTEM.md MUST agree
+section 1.1 decompression-bomb guard + the section 5.5 single-context compression boundary; (g) signs
+EVERY message/frame with the Ed25519 sender key and rejects any unsigned/bad-signature message
+fail-closed (section 5.1); (h) enforces the section 5.6 anti-replay scheme (counter + freshness window +
+bounded sliding-window dedup) and passes its replay/stale/reorder/cross-session/flood KATs. SPEC.md, docs.dig.net protocol page, and superproject SYSTEM.md MUST agree
 (ecosystem section 4.2 layering).
