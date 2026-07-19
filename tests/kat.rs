@@ -361,11 +361,17 @@ fn kat_cross_session_frame_replay_rejected() {
         bob.accept(&data, from_alice, KAT_NOW).unwrap(),
         StreamAccept::Event(StreamEvent::Data(_))
     ));
-    // Re-injecting the captured frame is dropped by the persistent replay guard → RESET.
+    // Re-injecting the captured frame is dropped by the persistent replay guard → DROP, never a signed
+    // RESET (a RESET must not beget a RESET; §5.4 anti-storm). The live stream is left untouched.
     assert!(matches!(
         bob.accept(&data, from_alice, KAT_NOW).unwrap(),
-        StreamAccept::Reset { .. }
+        StreamAccept::Dropped { .. }
     ));
+    assert_eq!(
+        bob.stream_count(),
+        1,
+        "the replayed frame does not tear down the live stream"
+    );
 }
 
 #[test]

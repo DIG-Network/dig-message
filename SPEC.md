@@ -341,6 +341,23 @@ streams one peer may hold OPEN at once — the transport reassembler is bounded 
 the cap is rejected and the stream RESET. The base spec provides this per-stream secure channel; a higher
 layer (dig-chat #768) MAY layer a Double Ratchet over its payload.
 
+RESET-on-failed-verify — DROP, do not broadcast (NORMATIVE, anti-storm). The security purpose of
+rejecting a bad frame is to NEVER deliver corrupt data and NEVER let a bad frame poison a stream;
+SILENTLY DROPPING the frame fully satisfies that. A RESET is itself a real signed, non-replayable frame,
+so a receiver MUST NOT emit one in response to unauthenticated or duplicate input — otherwise the
+untrusted relay (section 5.4) weaponizes it: (a) a self-sustaining RESET reflection storm (inject ONE
+garbage frame with an arbitrary correlation_id → receiver RESETs → the other side has no such session →
+it RESETs back → unbounded ping-pong, each hop a BLS verify + BLS sign + KEM), and (b) a replay-teardown
+(re-inject one prior valid DATA frame on a LIVE stream → the anti-replay guard rejects it → a RESET tears
+down the healthy stream — a relay holding NO key kills any stream). Therefore a receiver MUST **DROP
+silently** (no frame emitted, any live session left UNTOUCHED) for: a failed open/verify (bad seal, bad
+signature, replay, expiry, unresolvable sender), a non-stream or unknown-kind frame, an inbound RESET,
+and any frame addressing an UNKNOWN stream. A receiver MUST emit a RESET **only** for a state-machine
+violation (bad seq/credit/half-close) detected on an AUTHENTICATED frame for a KNOWN, live session, or
+for the concurrent-stream cap on an authenticated OPEN — cases where the frame is provably genuine, so it
+cannot be forged or replayed and the peer receiving the RESET for its own live/opening stream tears it
+down without re-RESETting. **A RESET MUST NEVER beget a RESET.**
+
 ### 5.4 Public-broadcast exemption
 Consensus broadcast (opcodes 200-219: blocks, transactions, attestations, checkpoints — addressed to ALL
 peers) has no single recipient key and is NOT dig-message-sealed; it stays mTLS-authenticated + signed.

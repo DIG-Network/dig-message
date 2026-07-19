@@ -109,15 +109,32 @@ pub enum StreamEvent {
     PeerReset,
 }
 
-/// The outcome of [`StreamEndpoint::accept`]: either a verified [`StreamEvent`], or — on ANY failed
-/// verify or protocol violation — a sealed RESET the caller MUST send to the peer (SPEC §3 gate item:
-/// RESET-on-failed-verify). The offending session, if any, has already been dropped.
+/// The outcome of [`StreamEndpoint::accept`] (SPEC §3, RESET-on-failed-verify gate item #1162).
+///
+/// The security purpose of "RESET-on-failed-verify" is to NEVER deliver corrupt data and NEVER let a bad
+/// frame poison a stream — **dropping the frame fully satisfies that**. Emitting a *signed* RESET is a
+/// separate, RESTRICTED action, because a RESET is itself a real non-replayable frame: broadcasting one
+/// in response to unauthenticated or duplicate input lets the untrusted relay (§5.4) weaponize it —
+/// a self-sustaining RESET reflection storm (inject-only), or tearing down a healthy stream by replaying
+/// one frame. So a RESET must NEVER beget a RESET. The three outcomes:
 #[derive(Debug, PartialEq, Eq)]
 pub enum StreamAccept {
     /// A verified, in-order event.
     Event(StreamEvent),
-    /// Verification or the state machine rejected the frame; send this RESET and consider the stream
-    /// aborted. `cause` records why (a bad seal/signature, a replay, a credit/ordering violation, …).
+    /// The frame was rejected and SILENTLY DROPPED — nothing is transmitted. This covers every
+    /// unauthenticated or non-actionable input: a failed open/verify (bad seal / bad signature /
+    /// replay / expiry / unresolvable sender), a non-stream or unknown-kind frame, an inbound RESET,
+    /// and any frame addressing an unknown stream. A live session, if any, is left UNTOUCHED (a garbage
+    /// or replayed frame never tears down a healthy stream). `cause` records why.
+    Dropped {
+        /// Why the frame was dropped.
+        cause: MessageError,
+    },
+    /// The state machine rejected an AUTHENTICATED frame on a KNOWN stream (an ordering/credit/half-close
+    /// violation by the verified peer, or the concurrent-stream cap) — send this RESET and consider the
+    /// stream aborted. This is the ONLY transmitting rejection, and it is safe: the frame was
+    /// cryptographically authenticated, so it cannot be forged or replayed by the relay, and the peer
+    /// receiving the RESET for its own live/opening stream tears it down without re-RESETting (no storm).
     Reset {
         /// The sealed RESET frame to transmit to the peer (boxed — it dwarfs the `Event` variant).
         frame: Box<DigMessageEnvelope>,
@@ -572,15 +589,19 @@ impl<'a> StreamEndpoint<'a> {
 
     /// Open + fully verify an inbound frame and drive the state machine (SPEC §3). On success returns a
     /// verified [`StreamEvent`]; on ANY failed verify or protocol violation returns
-    /// [`StreamAccept::Reset`] — a sealed RESET the caller sends to the peer, the offending session
-    /// dropped (SPEC §3 gate item: RESET-on-failed-verify).
+    /// [`StreamAccept::Dropped`] — a bad/unauthenticated/non-actionable frame silently discarded (a live
+    /// session is left untouched); or, ONLY for a state-machine violation by the AUTHENTICATED peer on a
+    /// KNOWN stream (or the concurrent-stream cap), [`StreamAccept::Reset`] — a sealed RESET the caller
+    /// sends. A RESET is NEVER emitted for unauthenticated or duplicate input, so the untrusted relay
+    /// (§5.4) cannot provoke a RESET reflection storm or replay-teardown (SPEC §3, gate item #1162).
     ///
     /// `resolve_sender_pub` maps `(peer DID, epoch)` to the peer's 48-byte G1 key (usually the endpoint's
     /// own `peer_pub`); `now_ms` is our wall clock for the freshness + expiry checks.
     ///
     /// # Errors
-    /// Only a failure to SEAL the RESET response propagates as `Err`; a rejected inbound frame is the
-    /// non-error [`StreamAccept::Reset`] outcome (the caller must still send it).
+    /// Only a failure to SEAL the RESET response (on the authenticated-violation path) propagates as
+    /// `Err`; a rejected inbound frame is the non-error [`StreamAccept::Dropped`]/[`StreamAccept::Reset`]
+    /// outcome.
     pub fn accept(
         &mut self,
         envelope: &DigMessageEnvelope,
@@ -590,8 +611,12 @@ impl<'a> StreamEndpoint<'a> {
         let correlation_id = envelope.correlation_id;
 
         // 1. Open + fully verify the seal (subgroup, AEAD, BLS sig, header-match, expiry, anti-replay).
-        //    ANY failure → RESET-on-failed-verify (gate item): a garbage/forged/replayed frame never
-        //    poisons the stream silently.
+        //    ANY failure → DROP (never a RESET): the frame is unauthenticated (garbage/forged) or a
+        //    replay/stale/expired frame the relay re-injected — it cannot be trusted to name a stream, so
+        //    responding with a signed RESET would let the relay weaponize it (reflection storm /
+        //    replay-teardown, §5.4). Dropping fully satisfies "never deliver corrupt data"; a live
+        //    session for this correlation_id (if any) is left UNTOUCHED (a replayed frame never tears
+        //    down a healthy stream).
         let opened = match open_message(
             self.identity_sk,
             envelope,
@@ -600,44 +625,52 @@ impl<'a> StreamEndpoint<'a> {
             now_ms,
         ) {
             Ok(opened) => opened,
-            Err(cause) => return self.reset_response(correlation_id, now_ms, cause),
+            Err(cause) => return Ok(StreamAccept::Dropped { cause }),
         };
 
-        // 2. It MUST be a stream frame with a known kind (SPEC §3).
+        // 2. It MUST be a stream frame with a known kind (SPEC §3). A malformed-but-authenticated frame
+        //    is a no-op → DROP (no RESET: still not an actionable state-machine event).
         let Some(hdr) = envelope.stream else {
-            return self.reset_response(
-                correlation_id,
-                now_ms,
-                MessageError::StreamProtocol("stream event on a non-stream envelope"),
-            );
+            return Ok(StreamAccept::Dropped {
+                cause: MessageError::StreamProtocol("stream event on a non-stream envelope"),
+            });
         };
         let Some(frame) = StreamFrame::from_u8(hdr.frame) else {
-            return self.reset_response(
-                correlation_id,
-                now_ms,
-                MessageError::StreamProtocol("unknown stream frame kind"),
-            );
+            return Ok(StreamAccept::Dropped {
+                cause: MessageError::StreamProtocol("unknown stream frame kind"),
+            });
         };
         if opened.shape != InteractionShape::StreamFrame {
-            return self.reset_response(
-                correlation_id,
-                now_ms,
-                MessageError::StreamProtocol("stream frame with a non-stream shape"),
-            );
+            return Ok(StreamAccept::Dropped {
+                cause: MessageError::StreamProtocol("stream frame with a non-stream shape"),
+            });
         }
 
-        // 3. OPEN starts a NEW session (registry-owned): enforce the concurrent-stream cap here.
+        // 3. An inbound RESET is terminal: a RESET must NEVER beget a RESET (anti-storm). If it names a
+        //    live session, tear that session down (PeerReset); otherwise DROP it silently.
+        if frame == StreamFrame::Reset {
+            return Ok(if self.sessions.remove(&correlation_id).is_some() {
+                StreamAccept::Event(StreamEvent::PeerReset)
+            } else {
+                StreamAccept::Dropped {
+                    cause: MessageError::StreamProtocol("RESET for an unknown stream"),
+                }
+            });
+        }
+
+        // 4. OPEN starts a NEW session (registry-owned): enforce the concurrent-stream cap here.
         if frame == StreamFrame::Open {
             return self.accept_open(correlation_id, hdr, now_ms);
         }
 
-        // 4. Every other frame drives an existing session; an unknown correlation_id → RESET.
+        // 5. Every other frame drives an existing session. A frame for an UNKNOWN stream is DROPPED (no
+        //    RESET): it may be a late/stale frame after we dropped the session, and RESETting it would
+        //    feed a ping-pong. Only a state-machine violation by the authenticated peer on a KNOWN
+        //    session warrants a RESET (the frame is provably genuine, so no forge/replay storm).
         if !self.sessions.contains_key(&correlation_id) {
-            return self.reset_response(
-                correlation_id,
-                now_ms,
-                MessageError::StreamProtocol("frame for an unknown stream"),
-            );
+            return Ok(StreamAccept::Dropped {
+                cause: MessageError::StreamProtocol("frame for an unknown stream"),
+            });
         }
         let transition = self
             .sessions
@@ -658,7 +691,8 @@ impl<'a> StreamEndpoint<'a> {
     }
 
     /// Handle a verified inbound OPEN: enforce the per-peer concurrent-stream cap, create the responder
-    /// session, and report [`StreamEvent::Opened`] (SPEC §3).
+    /// session, and report [`StreamEvent::Opened`] (SPEC §3). The OPEN is already authenticated (it
+    /// passed `open_message`), so a RESET here is safe — it cannot be forged/replayed by the relay.
     fn accept_open(
         &mut self,
         correlation_id: Bytes32,
@@ -687,7 +721,9 @@ impl<'a> StreamEndpoint<'a> {
     }
 
     /// Build the [`StreamAccept::Reset`] outcome: seal a RESET to the peer for `correlation_id` and
-    /// report `cause` (SPEC §3 gate item: RESET-on-failed-verify).
+    /// report `cause`. Only ever called for an AUTHENTICATED state-machine violation on a known session
+    /// or the concurrent-stream cap — never for unauthenticated/duplicate input (a RESET must never beget
+    /// a RESET; SPEC §3 gate item #1162).
     fn reset_response(
         &mut self,
         correlation_id: Bytes32,
@@ -1002,7 +1038,9 @@ mod tests {
     }
 
     #[test]
-    fn reset_on_failed_verify_tampered_frame() {
+    fn failed_verify_frame_is_dropped_never_reset() {
+        // A tampered/forged frame is unauthenticated → DROP (no signed RESET), so an inject-only relay
+        // cannot provoke a RESET reflection storm (§5.4).
         let p = pair("badverify");
         let mut alice = StreamEndpoint::new(&p.a_sk, p.a_did, 0, p.b_did, &p.b_pub, MT);
         let mut bob = StreamEndpoint::new(&p.b_sk, p.b_did, 0, p.a_did, &p.a_pub, MT);
@@ -1010,25 +1048,26 @@ mod tests {
         let stream = cid("badverify/s");
 
         let mut open = alice.open(stream, 4, NOW, 0).unwrap();
-        // Tamper the ciphertext: the AEAD open fails → RESET-on-failed-verify.
         let last = open.sealed.ciphertext.len() - 1;
         open.sealed.ciphertext[last] ^= 0x01;
-        match bob.accept(&open, sender_is_alice, NOW).unwrap() {
-            StreamAccept::Reset { cause, .. } => assert_eq!(cause, MessageError::OpenFailed),
-            other => panic!("expected a RESET, got {other:?}"),
-        }
+        assert_eq!(
+            bob.accept(&open, sender_is_alice, NOW).unwrap(),
+            StreamAccept::Dropped {
+                cause: MessageError::OpenFailed
+            }
+        );
         assert_eq!(bob.stream_count(), 0);
     }
 
     #[test]
-    fn reset_on_protocol_violation_data_before_open() {
+    fn frame_for_unknown_stream_is_dropped_never_reset() {
         let p = pair("proto");
         let mut alice = StreamEndpoint::new(&p.a_sk, p.a_did, 0, p.b_did, &p.b_pub, MT);
         let mut bob = StreamEndpoint::new(&p.b_sk, p.b_did, 0, p.a_did, &p.a_pub, MT);
         let sender_is_alice = |_d: Bytes32, _e: u32| Some(p.a_pub);
         let stream = cid("proto/s");
 
-        // Alice opens locally + forces a DATA without waiting for OPEN_ACK by granting herself credit.
+        // Alice forces an authenticated DATA without Bob ever seeing an OPEN.
         alice.open(stream, 4, NOW, 0).unwrap();
         alice
             .sessions
@@ -1037,19 +1076,17 @@ mod tests {
             .on_recv(StreamFrame::OpenAck, header(StreamFrame::OpenAck, 0, 4))
             .unwrap();
         let data = alice.send_data(stream, b"early", NOW, 0).unwrap();
-        // Bob never saw an OPEN for this stream → RESET (unknown stream).
-        match bob.accept(&data, sender_is_alice, NOW).unwrap() {
-            StreamAccept::Reset { cause, .. } => {
-                assert!(matches!(cause, MessageError::StreamProtocol(_)));
-            }
-            other => panic!("expected a RESET, got {other:?}"),
-        }
+        // Bob has no session for it → DROP (no RESET → no ping-pong).
+        assert!(matches!(
+            bob.accept(&data, sender_is_alice, NOW).unwrap(),
+            StreamAccept::Dropped { .. }
+        ));
     }
 
     #[test]
-    fn cross_session_frame_replay_is_rejected() {
-        // A DATA frame captured from one session, re-injected later, is dropped by the persistent
-        // anti-replay guard (per-sender monotonic counter) → RESET-on-failed-verify.
+    fn replayed_data_on_a_live_stream_is_dropped_and_stream_survives() {
+        // Exploit-B guard: the relay re-injects a prior valid DATA on a LIVE stream. The ReplayGuard
+        // rejects it → DROP (NOT a RESET), and the healthy session MUST stay live (no teardown).
         let p = pair("replay");
         let mut alice = StreamEndpoint::new(&p.a_sk, p.a_did, 0, p.b_did, &p.b_pub, MT);
         let mut bob = StreamEndpoint::new(&p.b_sk, p.b_did, 0, p.a_did, &p.a_pub, MT);
@@ -1065,11 +1102,69 @@ mod tests {
             bob.accept(&data, sender_is_alice, NOW).unwrap(),
             StreamAccept::Event(StreamEvent::Data(b"once".to_vec()))
         );
-        // Re-inject the exact same sealed frame: the guard rejects the duplicate counter → RESET.
-        match bob.accept(&data, sender_is_alice, NOW).unwrap() {
-            StreamAccept::Reset { cause, .. } => assert_eq!(cause, MessageError::Replay),
-            other => panic!("expected a replay RESET, got {other:?}"),
+        // Re-inject the exact same sealed frame: guard rejects the duplicate counter → DROP.
+        assert_eq!(
+            bob.accept(&data, sender_is_alice, NOW).unwrap(),
+            StreamAccept::Dropped {
+                cause: MessageError::Replay
+            }
+        );
+        // The stream is UNTOUCHED — a healthy stream is not torn down by a replayed frame.
+        assert_eq!(bob.stream_count(), 1);
+        assert_eq!(bob.session(stream).unwrap().state(), StreamState::Open);
+        // And the stream keeps working: the next in-order DATA is delivered.
+        let next = alice.send_data(stream, b"twice", NOW, 0).unwrap();
+        assert_eq!(
+            bob.accept(&next, sender_is_alice, NOW).unwrap(),
+            StreamAccept::Event(StreamEvent::Data(b"twice".to_vec()))
+        );
+    }
+
+    #[test]
+    fn inbound_reset_for_unknown_stream_does_not_beget_a_reset() {
+        // Anti-storm: an inbound RESET naming an unknown stream is DROPPED, never answered with a RESET.
+        let p = pair("resetstorm");
+        let mut alice = StreamEndpoint::new(&p.a_sk, p.a_did, 0, p.b_did, &p.b_pub, MT);
+        let mut bob = StreamEndpoint::new(&p.b_sk, p.b_did, 0, p.a_did, &p.a_pub, MT);
+        let sender_is_alice = |_d: Bytes32, _e: u32| Some(p.a_pub);
+
+        // Alice opens then RESETs a stream Bob never saw → Bob receives a RESET for an unknown stream.
+        let ghost = cid("resetstorm/ghost");
+        alice.open(ghost, 1, NOW, 0).unwrap();
+        let reset = alice.reset(ghost, NOW, 0).unwrap();
+        assert!(matches!(
+            bob.accept(&reset, sender_is_alice, NOW).unwrap(),
+            StreamAccept::Dropped { .. }
+        ));
+        assert_eq!(bob.stream_count(), 0);
+    }
+
+    #[test]
+    fn protocol_violation_on_established_stream_still_resets() {
+        // The LEGIT RESET path: an authenticated peer breaks the state machine on a KNOWN session
+        // (a bad DATA seq) → RESET + drop the session.
+        let p = pair("legitreset");
+        let mut alice = StreamEndpoint::new(&p.a_sk, p.a_did, 0, p.b_did, &p.b_pub, MT);
+        let mut bob = StreamEndpoint::new(&p.b_sk, p.b_did, 0, p.a_did, &p.a_pub, MT);
+        let sender_is_alice = |_d: Bytes32, _e: u32| Some(p.a_pub);
+        let sender_is_bob = |_d: Bytes32, _e: u32| Some(p.b_pub);
+        let stream = cid("legitreset/s");
+
+        let open = alice.open(stream, 4, NOW, 0).unwrap();
+        bob.accept(&open, sender_is_alice, NOW).unwrap();
+        let ack = bob.open_ack(stream, 4, NOW, 0).unwrap();
+        alice.accept(&ack, sender_is_bob, NOW).unwrap();
+
+        // Alice (mis)sends DATA at seq 1 first (skipping 0) by desyncing her local send_seq.
+        alice.sessions.get_mut(&stream).unwrap().send_seq = 1;
+        let bad = alice.send_data(stream, b"gap", NOW, 0).unwrap();
+        match bob.accept(&bad, sender_is_alice, NOW).unwrap() {
+            StreamAccept::Reset { cause, .. } => {
+                assert!(matches!(cause, MessageError::StreamProtocol(_)));
+            }
+            other => panic!("expected a RESET on the authenticated violation, got {other:?}"),
         }
+        assert_eq!(bob.stream_count(), 0, "the violated session is dropped");
     }
 
     #[test]

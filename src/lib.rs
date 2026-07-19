@@ -26,8 +26,11 @@
 //! - [`StreamEndpoint`] — the per-peer registry driving OPEN/OPEN_ACK/DATA/CREDIT/CLOSE/CLOSE_ACK/RESET
 //!   with ordered delivery (strictly-monotonic seq), credit backpressure, bidirectional half-close, and
 //!   cancel. It seals EVERY frame with a fresh ephemeral (per-frame forward secrecy, no nonce reuse),
-//!   opens + fully verifies every inbound frame, bounds concurrent streams ([`MAX_CONCURRENT_STREAMS`]),
-//!   and RESETs a stream on any failed verify (gate items #1162).
+//!   opens + fully verifies every inbound frame, and bounds concurrent streams
+//!   ([`MAX_CONCURRENT_STREAMS`]). A bad/unauthenticated/duplicate frame is DROPPED (never answered with
+//!   a signed RESET — that would let the untrusted relay provoke a RESET reflection storm); a RESET is
+//!   emitted ONLY for a state-machine violation by the authenticated peer on a known stream, or the
+//!   concurrent-stream cap (gate items #1162).
 //! - [`StreamSession`] / [`StreamState`] / [`StreamEvent`] / [`StreamAccept`] — the pure state machine +
 //!   its observable states, verified events, and the accept outcome.
 //!
