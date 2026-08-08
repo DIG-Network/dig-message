@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [0.6.0] - 2026-08-08
+
+### Chores
+- **deps:** Bump dig-identity 0.4 -> 0.6 and the chia family 0.26 -> 0.36 (#12)
+
 ## [0.5.1] - 2026-07-19
 
 ### Bug Fixes
