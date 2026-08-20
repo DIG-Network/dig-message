@@ -2,7 +2,7 @@ name: Publish to crates.io
 
 # Tag-driven release: pushing a version tag `vX.Y.Z` runs the gates, publishes to crates.io, and
 # cuts a GitHub Release. A normal push to `main` runs the gates only (see ci.yml) — it does NOT
-# publish. Mirrors the sibling DIG crates so the same org secrets apply. dig-ipc-protocol is a leaf
+# publish. Mirrors the sibling DIG crates so the same org secrets apply. dig-message is a leaf
 # crate with NO dig-* dependencies, so there is no release-ordering constraint on other DIG crates.
 
 on:
@@ -76,19 +76,20 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
-          name: "dig-ipc-protocol v${{ steps.extract_version.outputs.VERSION }}"
+          name: "dig-message v${{ steps.extract_version.outputs.VERSION }}"
           body: |
-            ## dig-ipc-protocol v${{ steps.extract_version.outputs.VERSION }}
+            ## dig-message v${{ steps.extract_version.outputs.VERSION }}
 
-            Canonical dig-app ⇄ dig-node IPC session/signing contract: domain-separated challenge /
-            callback / user-sign message builders (app signs, engine verifies), frame bounds, the
-            JSON-RPC control.session.* wire types + sign callback, the seam traits + generic role-
-            halves, and the stable APP-SIGN error taxonomy.
+            The DIG Network generic base message protocol: the byte-deterministic
+            Chia-Streamable envelope + InnerMessage, length-framed size-bounded framing,
+            additive compression (raw + zstd, decompression-bomb guarded), and the extensible
+            message-type registry that every directed (1:1 / group) e2e-sealed peer message
+            rides.
 
             ### Installation
             ```toml
             [dependencies]
-            dig-ipc-protocol = "${{ steps.extract_version.outputs.VERSION }}"
+            dig-message = "${{ steps.extract_version.outputs.VERSION }}"
             ```
           draft: false
           prerelease: false
