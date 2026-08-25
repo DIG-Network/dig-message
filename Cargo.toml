@@ -11,7 +11,7 @@
 # as placeholders so the wire shape is final.
 [package]
 name = "dig-message"
-version = "0.6.1"
+version = "0.7.0"
 edition = "2021"
 rust-version = "1.75.0"
 license = "Apache-2.0 OR MIT"
@@ -42,7 +42,17 @@ thiserror = "1"
 # The ONE identity keypair primitives (WU2 seal): g1_dh / sign_message / verify_signature /
 # g1_subgroup_check / public_key_bytes over the Chia BLS12-381 key — NEVER re-roll BLS/curve ops
 # (SPEC §5.1). Crates.io dep (the #1160 resolution: dig-identity is published).
-dig-identity = "0.6"
+#
+# HELD IN STEP WITH dig-nat's identity edge (dig_ecosystem#3159). dig-nat 0.21 requires
+# `dig-identity ^0.7`, and a `0.x` MINOR is semver-INCOMPATIBLE — so while this crate stayed on
+# `^0.6`, any consumer reaching BOTH (dig-peer reaches dig-identity through dig-message and through
+# dig-nat) resolved TWO dig-identity copies, and with them two `chia-sdk-utils` lines. dig-identity
+# 0.7.0 is purely ADDITIVE over 0.6.0 (it absorbs a chain-independent store update-authority guard;
+# DIG-Network/dig-identity#9) and 0.7.1 is its `chia-sdk-utils 0.34 -> 0.36` bump, so the four
+# functions this crate calls — `g1_dh`, `g1_subgroup_check`, `public_key_bytes`, `sign_message` /
+# `verify_signature`, plus `bls::SecretKey` — are unchanged. chia-bls stays on ONE 0.36 line across
+# both, so the key types still agree byte-for-byte.
+dig-identity = "0.7"
 # chia-bls SecretKey/PublicKey types + the ephemeral-key derivation for the DHKEM encapsulation
 # (pinned to dig-identity's version so the key types agree byte-for-byte).
 chia-bls = "0.36"
