@@ -183,9 +183,9 @@ dependencies = [
 
 [[package]]
 name = "chia-sdk-utils"
-version = "0.34.0"
+version = "0.36.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b7831343041ceb5f170ef4ff8d8c2b91c055ab75f8a8e075e8bef2c423a0c47c"
+checksum = "bdf8cc5b71cd030775165aa1a107f3a138b79838f215f1047ca3484fe10f28d9"
 dependencies = [
  "bech32",
  "chia-protocol",
@@ -397,9 +397,9 @@ dependencies = [
 
 [[package]]
 name = "dig-identity"
-version = "0.6.0"
+version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aa7453530fe41c51d40100b0a68f77bab0b523ddbeb0e6514e7efbb2360b5472"
+checksum = "68a118ed742915b66d0824db7bda3c6791d75ea7a2f1dbdf89422112878a782c"
 dependencies = [
  "blst",
  "chia-bls 0.36.1",
@@ -412,7 +412,7 @@ dependencies = [
 
 [[package]]
 name = "dig-message"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "chacha20poly1305",
  "chia-bls 0.36.1",
