@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [0.7.0] - 2026-08-25
+
+### Build
+- **deps:** Hold dig-identity in step with dig-nat 0.21, release 0.7.0 (#14)
+
 ## [0.6.1] - 2026-08-20
 
 ### Bug Fixes
